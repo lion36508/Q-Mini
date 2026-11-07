@@ -26,14 +26,24 @@ def test_future_tokens_do_not_change_past_logits(tiny_config):
     assert torch.allclose(logits_a[:, :12], logits_b[:, :12], atol=1e-6, rtol=1e-6)
 
 
-def test_router_gets_gradient(tiny_config):
+def test_router_gets_gradient_from_language_model_loss(tiny_config):
     model = QMiniMoE(tiny_config)
     ids = torch.randint(0, tiny_config.vocab_size, (2, 12))
-    out = model(ids)
-    (out["logits"].float().square().mean() + out["aux_loss"]).backward()
+    logits = model(ids)["logits"]
+    logits.float().square().mean().backward()
     gradient = model.blocks[0].moe.router.weight.grad
     assert gradient is not None
     assert torch.isfinite(gradient).all()
+    assert gradient.abs().sum() > 0
+
+
+def test_router_balance_loss_has_gradient(tiny_config):
+    model = QMiniMoE(tiny_config)
+    ids = torch.randint(0, tiny_config.vocab_size, (2, 12))
+    result = model(ids)
+    result["aux_loss"].backward()
+    gradient = model.blocks[0].moe.router.weight.grad
+    assert gradient is not None and torch.isfinite(gradient).all()
     assert gradient.abs().sum() > 0
 
 

@@ -64,8 +64,9 @@ class CausalGatedDepthwiseConv(nn.Module):
         content = fake_quantize_int8(content).transpose(1, 2)
         left_pad = self.dilation * (self.kernel_size - 1)
         content = F.pad(content, (left_pad, 0))
-        kernel = quantize_quaternary(self.depthwise_weight.reshape(self.depthwise_weight.shape[0], -1))
-        kernel = kernel.reshape_as(self.depthwise_weight)
+        kernel = quantize_quaternary(
+            self.depthwise_weight.reshape(self.depthwise_weight.shape[0], -1)
+        ).reshape_as(self.depthwise_weight)
         mixed = F.conv1d(
             content, kernel, self.depthwise_bias, stride=1,
             padding=0, dilation=self.dilation,
@@ -100,15 +101,20 @@ class SparseTop1MoE(nn.Module):
         probabilities = F.softmax(self.router(self.router_norm(x)).float(), dim=-1)
         flat_probs = probabilities.reshape(-1, self.n_experts)
         selected = flat_probs.argmax(dim=-1)
+        selected_weights = flat_probs.gather(1, selected.unsqueeze(1))
         load = F.one_hot(selected, num_classes=self.n_experts).float().mean(dim=0)
         importance = flat_probs.mean(dim=0)
         aux_loss = self.n_experts * torch.sum(importance * load)
+
         output = torch.zeros_like(flat)
         for expert_id, expert in enumerate(self.experts):
             indices = torch.nonzero(selected == expert_id, as_tuple=False).flatten()
             if indices.numel():
-                expert_output = expert(flat.index_select(0, indices))
-                output = output.index_copy(0, indices, expert_output)
+                expert_input = flat.index_select(0, indices)
+                expert_output = expert(expert_input)
+                expert_gate = selected_weights.index_select(0, indices).to(expert_output.dtype)
+                output = output.index_copy(0, indices, expert_output * expert_gate)
+
         counts = torch.bincount(selected, minlength=self.n_experts)
         return output.reshape(shape), aux_loss, counts
 
@@ -146,9 +152,7 @@ class QMiniMoE(nn.Module):
             raise ValueError("input_ids must have shape [batch, sequence].")
         sequence_length = int(input_ids.shape[1])
         if not 1 <= sequence_length <= self.config.max_context:
-            raise ValueError(
-                f"Sequence length must be in [1, {self.config.max_context}]."
-            )
+            raise ValueError(f"Sequence length must be in [1, {self.config.max_context}].")
         if input_ids.shape[0] < 1:
             raise ValueError("Batch size must be at least one.")
         steps = self.config.thinking_steps if thinking_steps is None else int(thinking_steps)
