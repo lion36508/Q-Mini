@@ -71,7 +71,10 @@ def train_model(config, train_bin, valid_bin, output_dir, steps, batch_size=4, s
         print(f"Resuming from optimizer step {start_step:,}.")
     amp = device.type == "cuda"
     bf16 = bool(amp and torch.cuda.is_bf16_supported()); fp16 = bool(amp and not bf16)
-    scaler = torch.cuda.amp.GradScaler(enabled=fp16)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=fp16)
+    else:  # Compatibility with older supported PyTorch builds.
+        scaler = torch.cuda.amp.GradScaler(enabled=fp16)
     print(f"Device={device}; AMP={'BF16' if bf16 else 'FP16' if fp16 else 'off'}; parameters={model.parameter_report()['total']:,}; global_batch={batch_size * grad_accum}")
     def lr_at(step):
         warmup = max(1, int(steps * 0.03))
@@ -119,4 +122,7 @@ def train_model(config, train_bin, valid_bin, output_dir, steps, batch_size=4, s
     final_dir = run_dir / "final_model"; final_dir.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), final_dir / "model.pt"); config.save(final_dir / "config.json")
     if tokenizer_path and Path(tokenizer_path).is_file(): shutil.copy2(tokenizer_path, final_dir / "tokenizer.json")
+    from .export import export_packed_state
+    packed_path = export_packed_state(model.state_dict(), config, final_dir / "model.qmini.npz")
+    print(f"Packed inference export: {packed_path} ({packed_path.stat().st_size:,} bytes)")
     print(f"Training complete: {final_dir}"); return final_dir

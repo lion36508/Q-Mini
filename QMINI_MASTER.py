@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Q-Mini project master entry point; model implementation remains in qmini/."""
+from __future__ import annotations
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+
+def run(command: list[str]) -> int:
+    return subprocess.run(command, cwd=ROOT, check=False).returncode
+
+
+def usage() -> None:
+    print("Q-MINI MASTER")
+    print("  python QMINI_MASTER.py audit [--config configs/qmini_base.json]")
+    print("  python QMINI_MASTER.py verify")
+    print("  python QMINI_MASTER.py kernel")
+    print("  python QMINI_MASTER.py tokenizer ...")
+    print("  python QMINI_MASTER.py prepare ...")
+    print("  python QMINI_MASTER.py train ...")
+    print("  python QMINI_MASTER.py generate ...")
+    print("  python QMINI_MASTER.py chat ...")
+    print("  python QMINI_MASTER.py verify-export --path MODEL.qmini.npz")
+
+
+def main() -> int:
+    if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help"}:
+        usage()
+        return 0
+    command = sys.argv[1]
+    if command == "verify":
+        checks = [
+            [sys.executable, "-m", "pytest", "-q"],
+            [sys.executable, "-m", "qmini.native", "--build"],
+            [sys.executable, "-m", "qmini.cli", "audit", "--config", "configs/qmini_smoke.json"],
+        ]
+        for check in checks:
+            status = run(check)
+            if status:
+                return status
+        print("Q-Mini verification completed.")
+        return 0
+    if command == "kernel":
+        return run([sys.executable, "-m", "qmini.native", "--build"])
+    # All model/data/train/inference commands are delegated to the single CLI implementation.
+    sys.argv = ["qmini", *sys.argv[1:]]
+    from qmini.cli import main as cli_main
+    cli_main()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

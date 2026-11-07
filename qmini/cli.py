@@ -62,6 +62,12 @@ def main():
         model, tokenizer, _ = load_model(a.model_dir, a.device)
         print(generate(model, tokenizer, a.prompt, a.max_new_tokens, a.temperature, a.top_k, a.top_p, a.thinking_steps)); return 0
     gen.set_defaults(func=do_generate)
+    verify_export = commands.add_parser("verify-export", help="validate a packed Q-Mini NPZ export")
+    verify_export.add_argument("--path", required=True)
+    def do_verify_export(a):
+        from .export import verify_packed_export
+        print(json.dumps(verify_packed_export(a.path), indent=2)); return 0
+    verify_export.set_defaults(func=do_verify_export)
     chat = commands.add_parser("chat", help="interactive terminal chat")
     chat.add_argument("--model-dir", required=True); chat.add_argument("--max-new-tokens", type=int, default=160)
     chat.set_defaults(func=lambda a: (interactive_chat(a.model_dir, a.max_new_tokens) or 0))

@@ -17,7 +17,7 @@ The theoretical receptive field of the six main convolution blocks is 568 tokens
 
 ## Repository
 
-`qmini/` contains model, quantization, tokenizer, data, trainer, inference and CLI. `configs/` contains base and smoke profiles. `tests/` checks causal behavior, routing gradients, quantization, data parsing and C++ parity. `docs/` describes architecture, training and evaluation. `colab/` contains a Google Colab pipeline. `.github/workflows/` runs tests on pushes and pull requests.
+`QMINI_MASTER.py` is the project entry point. `qmini/` contains model, quantization, packed export, tokenizer, data, trainer, inference and CLI. `configs/` contains base and smoke profiles. `tests/` checks causal behavior, routing gradients, quantization, data parsing and C++ parity. `docs/` describes architecture, training and evaluation. `colab/` contains a Google Colab pipeline. `.github/workflows/` runs tests on pushes and pull requests.
 
 ## Local setup
 
@@ -26,6 +26,7 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 pytest -q
+python QMINI_MASTER.py verify
 python -m qmini.cli audit --config configs/qmini_smoke.json
 ```
 
@@ -41,7 +42,7 @@ python -m qmini.cli prepare --data-dir /content/drive/MyDrive/QMini/datasets --t
 python -m qmini.cli train --config /content/drive/MyDrive/QMini/artifacts/qmini_active_config.json --train-bin /content/drive/MyDrive/QMini/artifacts/tokens/train.bin --valid-bin /content/drive/MyDrive/QMini/artifacts/tokens/valid.bin --tokenizer /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --output-dir /content/drive/MyDrive/QMini/artifacts/runs/base --steps 10000 --batch-size 2 --seq-len 512 --grad-accum 8
 ```
 
-Resume with `--resume`; the step value is the target total optimizer step, not an extra increment. Start with a smoke run and inspect actual GPU memory before scaling batch or sequence length.
+The final run exports `final_model/model.qmini.npz` with packed 2-bit quaternary tensors and FP16 bias/norm tensors; validate it with `python -m qmini.cli verify-export --path /path/to/final_model/model.qmini.npz`. Resume with `--resume`; the step value is the target total optimizer step, not an extra increment. Start with a smoke run and inspect actual GPU memory before scaling batch or sequence length.
 
 ## Native kernel and mobile boundary
 
