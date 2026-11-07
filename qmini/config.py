@@ -1,0 +1,75 @@
+from __future__ import annotations
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+@dataclass
+class QMiniConfig:
+    vocab_size: int = 4096
+    d_model: int = 256
+    d_hidden: int = 384
+    n_layers: int = 6
+    n_experts: int = 4
+    top_k: int = 1
+    max_context: int = 512
+    kernel_size: int = 10
+    dilations: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
+    max_thinking_steps: int = 4
+    thinking_steps: int = 2
+    rms_norm_eps: float = 1e-5
+    dropout: float = 0.0
+    router_aux_loss_coef: float = 0.01
+    seed: int = 42
+
+    def validate(self) -> None:
+        positive = {"vocab_size": self.vocab_size, "d_model": self.d_model,
+                    "d_hidden": self.d_hidden, "n_layers": self.n_layers,
+                    "n_experts": self.n_experts, "max_context": self.max_context,
+                    "kernel_size": self.kernel_size, "max_thinking_steps": self.max_thinking_steps,
+                    "thinking_steps": self.thinking_steps}
+        bad = [key for key, value in positive.items() if value <= 0]
+        if bad:
+            raise ValueError("Must be positive: " + ", ".join(bad))
+        if self.top_k != 1:
+            raise ValueError("Q-Mini currently implements sparse Top-1 routing only.")
+        if len(self.dilations) != self.n_layers or any(int(d) <= 0 for d in self.dilations):
+            raise ValueError("dilations must contain one positive value per main block.")
+        if self.thinking_steps > self.max_thinking_steps:
+            raise ValueError("thinking_steps cannot exceed max_thinking_steps.")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1).")
+        if self.rms_norm_eps <= 0 or self.router_aux_loss_coef < 0:
+            raise ValueError("Invalid RMSNorm epsilon or router auxiliary loss coefficient.")
+
+    @classmethod
+    def from_dict(cls, values: dict[str, Any]) -> "QMiniConfig":
+        allowed = cls.__dataclass_fields__.keys()
+        clean = {key: value for key, value in values.items() if key in allowed}
+        if "dilations" in clean:
+            clean["dilations"] = tuple(int(x) for x in clean["dilations"])
+        config = cls(**clean)
+        config.validate()
+        return config
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "QMiniConfig":
+        with Path(path).open("r", encoding="utf-8") as handle:
+            values = json.load(handle)
+        if not isinstance(values, dict):
+            raise ValueError("Configuration must be a JSON object.")
+        return cls.from_dict(values)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def save(self, path: str | Path) -> Path:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as handle:
+            json.dump(self.to_dict(), handle, indent=2)
+            handle.write("\n")
+        return target
+
+    def main_receptive_field(self) -> int:
+        return 1 + (self.kernel_size - 1) * sum(self.dilations)
