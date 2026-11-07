@@ -17,36 +17,36 @@ The theoretical receptive field of the six main convolution blocks is 568 tokens
 
 ## Repository
 
-`QMINI_MASTER.py` is the project entry point. `qmini/` contains model, quantization, packed export, tokenizer, data, trainer, inference and CLI. `configs/` contains base and smoke profiles. `tests/` checks causal behavior, routing gradients, quantization, data parsing and C++ parity. `docs/` describes architecture, training and evaluation. `colab/` contains a Google Colab pipeline. `.github/workflows/` runs tests on pushes and pull requests.
+QMINI_MASTER.py is the project entry point. qmini/ contains model, quantization, packed export, tokenizer, data, trainer, inference and CLI. configs/ contains base and smoke profiles. tests/ checks causal behavior, routing gradients, quantization, data parsing, training/checkpoint resume, tokenizer round-trip, generation and C++ parity. docs/ describes architecture, training and evaluation. colab/ contains a Google Colab pipeline. .github/workflows/ runs tests on pushes and pull requests.
 
 ## Local setup
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
-pytest -q
-python QMINI_MASTER.py verify
-python -m qmini.cli audit --config configs/qmini_smoke.json
-```
+    python -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -e ".[dev]"
+    pytest -q
+    python QMINI_MASTER.py verify
+    python -m qmini.cli audit --config configs/qmini_smoke.json
 
 ## Google Colab
 
-Place licensed dataset files in `Google Drive/MyDrive/QMini/datasets/`. Open `colab/QMini_Training.ipynb`, select a GPU runtime and run the cells in order. Tokenizer, token streams, checkpoints, metrics and exports are stored in `Google Drive/MyDrive/QMini/artifacts/`, not in this public repository.
+Place licensed dataset files in Google Drive/MyDrive/QMini/datasets/. Open colab/QMini_Training.ipynb, select a GPU runtime and run the cells in order. Tokenizer, token streams, checkpoints, metrics and exports are stored in Google Drive/MyDrive/QMini/artifacts/, not in this public repository.
 
 Example commands after installation:
 
-```bash
-python -m qmini.cli tokenizer --data-dir /content/drive/MyDrive/QMini/datasets --output /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --vocab-size 4096 --config-output /content/drive/MyDrive/QMini/artifacts/qmini_active_config.json
-python -m qmini.cli prepare --data-dir /content/drive/MyDrive/QMini/datasets --tokenizer /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --output-dir /content/drive/MyDrive/QMini/artifacts/tokens
-python -m qmini.cli train --config /content/drive/MyDrive/QMini/artifacts/qmini_active_config.json --train-bin /content/drive/MyDrive/QMini/artifacts/tokens/train.bin --valid-bin /content/drive/MyDrive/QMini/artifacts/tokens/valid.bin --tokenizer /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --output-dir /content/drive/MyDrive/QMini/artifacts/runs/base --steps 10000 --batch-size 2 --seq-len 512 --grad-accum 8
-```
+    python -m qmini.cli tokenizer --data-dir /content/drive/MyDrive/QMini/datasets --output /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --vocab-size 4096 --config-output /content/drive/MyDrive/QMini/artifacts/qmini_active_config.json
+    python -m qmini.cli prepare --data-dir /content/drive/MyDrive/QMini/datasets --tokenizer /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --output-dir /content/drive/MyDrive/QMini/artifacts/tokens
+    python -m qmini.cli train --config /content/drive/MyDrive/QMini/artifacts/qmini_active_config.json --train-bin /content/drive/MyDrive/QMini/artifacts/tokens/train.bin --valid-bin /content/drive/MyDrive/QMini/artifacts/tokens/valid.bin --tokenizer /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --output-dir /content/drive/MyDrive/QMini/artifacts/runs/base --steps 10000 --batch-size 2 --seq-len 512 --grad-accum 8
 
-The final run exports `final_model/model.qmini.npz` with packed 2-bit quaternary tensors and FP16 bias/norm tensors; validate it with `python -m qmini.cli verify-export --path /path/to/final_model/model.qmini.npz`. Resume with `--resume`; the step value is the target total optimizer step, not an extra increment. Start with a smoke run and inspect actual GPU memory before scaling batch or sequence length.
+The final run exports final_model/model.qmini.npz with packed 2-bit quaternary tensors and FP16 bias/norm tensors; validate it with python -m qmini.cli verify-export --path /path/to/final_model/model.qmini.npz. Resume with --resume; the step value is the target total optimizer step, not an extra increment. Start with a smoke run and inspect actual GPU memory before scaling batch or sequence length.
+
+## Important inference distinction
+
+The current reference load_model/generate/chat path loads final_model/model.pt, a full-precision PyTorch state dictionary. The packed model.qmini.npz is a quantized storage/export artifact and is validated by the export checker; the reference chat path does not yet execute directly from that packed archive. QLinear uses fake quantization for quantization-aware training, not a true integer-only PyTorch GEMM.
 
 ## Native kernel and mobile boundary
 
-`bash scripts/build_native_kernel.sh` builds an optional C++17 packed-quaternary INT8 linear projection primitive. It is not a complete native model runtime. Full ARM64 inference still needs kernels for embeddings, causal convolution, normalization, sparse expert dispatch and output projection, plus numerical parity tests on actual devices.
+bash scripts/build_native_kernel.sh builds an optional C++17 packed-quaternary INT8 linear-projection primitive. That primitive is tested independently, but it is not yet wired into QMiniMoE's complete forward graph and is not a complete native model runtime. Full ARM64 inference still needs kernels for embeddings, causal convolution, normalization, sparse expert dispatch and output projection, plus numerical parity tests on actual devices.
 
 ## Limits and honest status
 
