@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
 
 @dataclass
 class QMiniConfig:
@@ -23,11 +25,13 @@ class QMiniConfig:
     seed: int = 42
 
     def validate(self) -> None:
-        positive = {"vocab_size": self.vocab_size, "d_model": self.d_model,
-                    "d_hidden": self.d_hidden, "n_layers": self.n_layers,
-                    "n_experts": self.n_experts, "max_context": self.max_context,
-                    "kernel_size": self.kernel_size, "max_thinking_steps": self.max_thinking_steps,
-                    "thinking_steps": self.thinking_steps}
+        positive = {
+            "vocab_size": self.vocab_size, "d_model": self.d_model,
+            "d_hidden": self.d_hidden, "n_layers": self.n_layers,
+            "n_experts": self.n_experts, "max_context": self.max_context,
+            "kernel_size": self.kernel_size, "max_thinking_steps": self.max_thinking_steps,
+            "thinking_steps": self.thinking_steps,
+        }
         bad = [key for key, value in positive.items() if value <= 0]
         if bad:
             raise ValueError("Must be positive: " + ", ".join(bad))
@@ -44,8 +48,13 @@ class QMiniConfig:
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "QMiniConfig":
-        allowed = cls.__dataclass_fields__.keys()
-        clean = {key: value for key, value in values.items() if key in allowed}
+        if not isinstance(values, dict):
+            raise TypeError("Configuration must be a dictionary.")
+        allowed = set(cls.__dataclass_fields__)
+        unknown = sorted(set(values) - allowed)
+        if unknown:
+            raise ValueError("Unknown Q-Mini config keys: " + ", ".join(unknown))
+        clean = dict(values)
         if "dilations" in clean:
             clean["dilations"] = tuple(int(x) for x in clean["dilations"])
         config = cls(**clean)
