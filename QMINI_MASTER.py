@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Q-Mini project master entry point; model implementation remains in qmini/."""
 from __future__ import annotations
+
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +28,9 @@ def usage() -> None:
 
 
 def main() -> int:
+    # Make every relative config/data path resolve from this repository, even when
+    # the script is launched via an absolute path from another working directory.
+    os.chdir(ROOT)
     if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help"}:
         usage()
         return 0
@@ -44,7 +49,6 @@ def main() -> int:
         return 0
     if command == "kernel":
         return run([sys.executable, "-m", "qmini.native", "--build"])
-    # All model/data/train/inference commands are delegated to the single CLI implementation.
     sys.argv = ["qmini", *sys.argv[1:]]
     from qmini.cli import main as cli_main
     cli_main()
