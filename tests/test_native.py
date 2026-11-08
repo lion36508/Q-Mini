@@ -187,3 +187,43 @@ def test_native_loader_retries_after_library_is_built(
     )
     assert native_module.get_native_kernel() is not None
     assert native_module.native_kernel_status()["available"] is True
+
+
+def test_native_wrapper_rejects_silent_dtype_narrowing(compiled_native_library):
+    native = NativeKernel(compiled_native_library)
+    packed = np.zeros((2, 1), dtype=np.uint8)
+    scales = np.ones(2, dtype=np.float32)
+    activation_scales = np.ones(1, dtype=np.float32)
+
+    with pytest.raises(TypeError, match="already int8"):
+        native.linear(
+            np.ones((1, 4), dtype=np.int64),
+            packed,
+            scales,
+            activation_scales,
+        )
+    with pytest.raises(TypeError, match="already uint8"):
+        native.linear(
+            np.ones((1, 4), dtype=np.int8),
+            np.zeros((2, 1), dtype=np.int16),
+            scales,
+            activation_scales,
+        )
+
+
+def test_outdated_native_library_fails_with_rebuild_instruction(tmp_path):
+    compiler = shutil.which("clang++") or shutil.which("g++")
+    if not compiler:
+        pytest.skip("C++ compiler missing")
+    old_source = tmp_path / "old_native.cpp"
+    old_library = tmp_path / "old_native.so"
+    old_source.write_text(
+        'extern "C" int qmini_linear_i8() { return 0; }',
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [compiler, "-shared", "-fPIC", str(old_source), "-o", str(old_library)],
+        check=True,
+    )
+    with pytest.raises(RuntimeError, match="Native library is outdated"):
+        NativeKernel(old_library)
