@@ -51,7 +51,7 @@ def main():
         from .train import train_model
         train_model(QMiniConfig.from_json(a.config), a.train_bin, a.valid_bin, a.output_dir,
             a.steps, a.batch_size, a.seq_len, a.grad_accum, a.lr, a.weight_decay,
-            a.eval_every, a.save_every, a.eval_batches, a.resume, a.tokenizer); return 0
+            a.eval_every, a.save_every, a.eval_batches, a.resume, a.tokenizer, None, a.extend_schedule, a.allow_legacy_resume); return 0
     train.set_defaults(func=do_train)
     gen = commands.add_parser("generate", help="generate from a trained model")
     gen.add_argument("--model-dir", required=True); gen.add_argument("--prompt", required=True)
