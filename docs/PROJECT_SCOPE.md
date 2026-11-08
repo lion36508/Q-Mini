@@ -121,7 +121,7 @@ Checkpoint metadata should remain sufficient to reproduce a run: model state, op
 - PyTorch reference inference is the correctness baseline.
 - Packed quaternary export is a storage format; it is not evidence of native integer execution.
 - The current C++17 primitive accelerates/tests a single projection operation only and is not wired into the full model.
-- A complete Android ARM64/Termux runtime is a later deliverable. It must implement embedding, quantized projection, causal convolution, normalization, expert dispatch, output projection and tokenizer compatibility.
+- The CPU projection kernel now has an AArch64/NEON integer-vector path and scalar fallback; CI cross-compiles the AArch64 shared library. A complete Android ARM64/Termux runtime remains a later deliverable and must also implement embedding, causal convolution, normalization, expert dispatch, output projection and tokenizer compatibility.
 - Native output must be compared to the reference implementation with stated numerical tolerances.
 - Device tests must report peak RAM, model size, cold-start time, tokens/second, thermal behavior and long-session stability.
 - No APK or Android UI is implied by this model repository.
@@ -163,7 +163,8 @@ Checkpoint metadata should remain sufficient to reproduce a run: model state, op
 ### Phase F — ARM64/Termux runtime
 - Full graph runs without Python/PyTorch if that remains the chosen deployment goal.
 - Correct tokenizer/config/model bundle loads.
-- Differential tests pass on supported devices.
+- Differential tests pass on supported devices, including device-specific NEON vs scalar parity.
+- Performance benchmarks report actual token throughput, memory and thermal stability on supported phones.
 - Real-device resource and stability reports are published.
 
 ## 9. Non-claims

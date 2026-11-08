@@ -163,9 +163,9 @@ Model-directed task execution remains a future, permission-controlled extension.
 
 **Development and training:** GitHub is the source of truth for code, configuration, tests and documentation. Google Colab is the GPU training environment. Google Drive is the recommended location for datasets, tokenizer artifacts, token streams, checkpoints, logs and model exports.
 
-**Local inference:** begin with the PyTorch reference path and measure CPU performance honestly. The current C++ projection primitive is only one component.
+**Local CPU inference:** the hybrid path uses the C++17 packed-quaternary × INT8 projection kernel when the shared library is available; AArch64/NEON builds use vector widening multiply and integer accumulation, while other architectures use the scalar integer fallback. The convolution, RMSNorm, embedding lookup and sparse dispatch remain PyTorch. The benchmark script reports the selected projection backend; performance must be measured on each target phone.
 
-**Android ARM64 / Termux (later phase):** the target is an offline-capable native inference library or command-line runtime. It requires compatible implementations for embedding lookup, quantized projections, causal depthwise convolution, RMSNorm, sparse expert dispatch and the output head. Each native component must be checked against the reference implementation and benchmarked on real devices. This repository does not currently build an APK or a complete Android runtime.
+**Android ARM64 / Termux:** the current native projection source has an AArch64/NEON compile path and CI cross-compiles it. A complete offline runtime still requires native embedding lookup, causal depthwise convolution, RMSNorm, sparse expert dispatch, output handling and tokenizer integration, plus differential tests and real-device benchmarks. CI cross-compilation is not an Android phone performance benchmark. This repository does not currently build an APK or complete Android runtime.
 
 ## 9. Roadmap
 
@@ -210,7 +210,8 @@ The notebook and CLI contain the full tokenizer, data preparation, training, res
 - qmini/generate.py — reference generation and terminal chat.
 - qmini/export.py — packed archive export and verification.
 - qmini/memory.py — opt-in local SQLite/FTS5 memory with explicit CRUD and JSON export.
-- qmini/native_kernel.cpp, qmini/native.py — native projection primitive and build helper.
+- qmini/native_kernel.cpp, qmini/native.py — packed INT8/quaternary CPU projection, AArch64/NEON path, scalar fallback and backend detection.
+- scripts/benchmark.py — repeatable model-forward throughput and resource benchmark.
 - configs/ — base and smoke configurations.
 - tests/ — model, causality, quantization, data, training, export and native tests.
 - docs/ — architecture, training, evaluation and project scope.
