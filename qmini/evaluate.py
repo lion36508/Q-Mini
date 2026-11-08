@@ -4,6 +4,7 @@ import json
 import math
 import re
 import time
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterator
@@ -15,17 +16,36 @@ from .generate import generate
 from .train import _load_masks, _load_tokens, _masked_cross_entropy, _sample_batch
 
 
+def _unicode_word_tokens(text: str) -> list[str]:
+    """Tokenize Unicode letters/digits while retaining combining marks."""
+    normalized = unicodedata.normalize("NFC", text.casefold())
+    tokens: list[str] = []
+    current: list[str] = []
+    for character in normalized:
+        category = unicodedata.category(character)
+        if character.isalnum() or character == "_":
+            current.append(character)
+        elif category.startswith("M") and current:
+            current.append(character)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 def normalize_answer(text: str) -> str:
     """Normalize Unicode word content for deterministic exact-match scoring."""
     if not isinstance(text, str):
         raise TypeError("Evaluation answers must be strings.")
-    return " ".join(re.findall(r"\w+", text.casefold(), flags=re.UNICODE))
+    return " ".join(_unicode_word_tokens(text))
 
 
 def token_f1(prediction: str, reference: str) -> float:
-    """Multiset word-level F1; a lexical diagnostic, not a semantic score."""
-    predicted = re.findall(r"\w+", prediction.casefold(), flags=re.UNICODE)
-    expected = re.findall(r"\w+", reference.casefold(), flags=re.UNICODE)
+    """Multiset Unicode-word F1; lexical diagnostic, not a semantic score."""
+    predicted = _unicode_word_tokens(prediction)
+    expected = _unicode_word_tokens(reference)
     if not predicted and not expected:
         return 1.0
     if not predicted or not expected:

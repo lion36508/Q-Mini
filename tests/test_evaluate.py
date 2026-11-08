@@ -10,6 +10,7 @@ from qmini.model import QMiniMoE
 def test_answer_normalization_and_lexical_f1():
     assert evaluate.normalize_answer("The Answer! 42.") == "the answer 42"
     assert evaluate.normalize_answer("Namaste, दुनिया!") == "namaste दुनिया"
+    assert evaluate.normalize_answer("café CAFÉ") == "café café"
     assert evaluate.token_f1("red red blue", "red blue") == 0.8
     assert evaluate.token_f1("", "") == 1.0
     assert evaluate.token_f1("blue", "red") == 0.0

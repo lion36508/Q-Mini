@@ -180,9 +180,8 @@ def test_chat_ending_with_unanswered_user_does_not_train_document_eos(tmp_path):
     end_id = special_token_id(tokenizer, "<|end|>")
     end_positions = np.flatnonzero(token_ids == end_id)
 
-    assert len(end_positions) == 2
-    assert loss_mask[end_positions[0]] == 1
-    assert loss_mask[end_positions[1]] == 0
+    assert len(end_positions) == 3
+    assert [int(loss_mask[position]) for position in end_positions] == [0, 1, 0]
     assert loss_mask[-1] == 0
 
 
