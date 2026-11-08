@@ -8,9 +8,9 @@ from qmini.tokenizer import train_tokenizer
 def test_load_and_generate_end_to_end(tiny_config, tmp_path):
     corpus = tmp_path / "corpus.txt"
     corpus.write_text(
-        "Q-Mini predicts the next token.\n"
-        "A causal model must not use future tokens.\n"
-        "Small models require careful evaluation.\n" * 4,
+        ("Q-Mini predicts the next token.\n\n"
+         "A causal model must not use future tokens.\n\n"
+         "Small models require careful evaluation.\n\n") * 4,
         encoding="utf-8",
     )
     model_dir = tmp_path / "final_model"

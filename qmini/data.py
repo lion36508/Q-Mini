@@ -192,8 +192,8 @@ def iter_training_text_records(
             ).fetchone()[0])
             if unique_count < 2:
                 raise ValueError(
-                    "At least two unique documents are required for a separated "
-                    "training/validation tokenizer split."
+                    "No unique training documents: at least two unique documents are required "
+                    "for a separated training/validation tokenizer split."
                 )
 
             valid_count = int(connection.execute(
