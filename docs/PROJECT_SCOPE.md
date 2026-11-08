@@ -77,9 +77,11 @@ Parameter accounting must be computed from the instantiated model. The six main 
 - Conversation-formatted datasets and structured Q/A records.
 - Source-aware answers when source text is supplied.
 
-### 4.6 Persistent memory and task tools — optional future extension
+### 4.6 Persistent memory and task tools
 
-The present model core has no persistent user-memory database or autonomous tool executor. If added later, those systems must be separate, auditable and permission-controlled:
+The current repository now includes an optional local SQLite memory store with FTS5 full-text retrieval (and a substring-search fallback on SQLite builds without FTS5). The memory subsystem remains separate from model weights and the neural forward graph. Writes occur only after an explicit /remember or qmini memory add action. Users can search, list, export and delete records.
+
+Model-directed task execution is still a future extension. Any such system must be separate, auditable and permission-controlled:
 
 - Long-term memory is opt-in and user-visible.
 - Users can inspect, correct, export and delete saved records.
@@ -154,7 +156,7 @@ Checkpoint metadata should remain sufficient to reproduce a run: model state, op
 - Memory and speed are measured on target hardware.
 
 ### Phase E — Assistant extensions
-- Memory has user controls, provenance and data deletion.
+- Local memory tests cover persistence, duplicate handling, search, export and explicit deletion; richer import/backup and policy controls remain future work.
 - Tool schemas, allow-lists, error handling and confirmation gates are tested.
 - Tool actions cannot run merely because generated text contains a command.
 
@@ -170,7 +172,7 @@ Q-Mini must not be described as:
 - Already trained or already a capable general-purpose assistant.
 - A 5B model or a model with an unverified parameter count.
 - A Transformer, RWKV implementation or official Microsoft BitNet implementation.
-- A model with currently working long-term memory or unrestricted agents.
+- An unrestricted autonomous agent. The optional local text memory is not a task-execution agent.
 - A complete integer-only or full ARM64 runtime.
 - A system that has passed benchmarks unless results and test conditions are recorded.
 

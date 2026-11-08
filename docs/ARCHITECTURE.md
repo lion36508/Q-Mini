@@ -42,3 +42,8 @@ The authoritative parameter count is computed from `sum(p.numel() for p in model
 ## Native runtime boundary
 
 The native kernel covers the dense linear projections only. Causal depthwise convolution, RMSNorm, token embedding lookup, sparse dispatch and state management remain PyTorch operations. This is intentionally a hybrid runtime; it must not be described as a full integer-only or fully native ARM64 model.
+
+
+## Local memory boundary
+
+The qmini/memory.py module provides an optional local SQLite store. FTS5 indexes note content and tags when available; otherwise search falls back to literal substring matching. Writes happen only through explicit user commands. This subsystem is not a neural memory layer, does not alter model weights and does not grant arbitrary tool execution.

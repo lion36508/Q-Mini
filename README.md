@@ -99,7 +99,7 @@ The shared refinement block is a learned hidden-state update that reuses paramet
 | Training | AdamW, gradient accumulation, available mixed precision, assistant-only loss masks for structured chat/Q&A, evaluation and fingerprinted resumable checkpoints | Longer curriculum training and measured instruction tuning |
 | Experts | Sparse Top-1 MoE and router/load statistics | Verified useful specialization without expert collapse |
 | Quantization | Quaternary/INT8 fake quantization and packed export | Calibrated, numerically verified low-bit execution |
-| Memory | No persistent user-memory subsystem yet | Optional local, user-controlled memory with inspect, edit and delete controls |
+| Memory | Opt-in local SQLite memory with FTS5 search, explicit save/recall/delete and JSON export | Improve retrieval and add user-controlled import/backup workflows |
 | Tools/tasks | CLI for project operations; no model-controlled general tool executor | Permission-gated registered tools for carefully scoped tasks |
 | Mobile | Standalone C++ projection primitive | Complete ARM64 runtime, integrated kernels and measured on-device inference |
 | Multilingual | Tokenizer and text pipeline support Unicode text | Language-specific training and held-out language evaluations |
@@ -151,18 +151,13 @@ A bigger model, more experts or additional refinement steps do not automatically
 
 Use fixed datasets, prompts and scoring methods when comparing revisions. Report sample counts and limitations; do not claim benchmark results from training data or cherry-picked samples.
 
-## 7. Memory and task execution — future, permission-controlled work
+## 7. Memory and task execution
 
-Persistent memory and model-directed task tools are **not implemented in the current Q-Mini core**. They are possible later additions around the language model:
+**Local memory is implemented as an optional subsystem outside the neural model.** It uses SQLite for persistence and FTS5 full-text search when the local SQLite build provides it; a literal-substring fallback is available when FTS5 is absent. Memory is never written automatically.
 
-- Optional local memory that the user can inspect, edit, export and delete.
-- Explicit separation between temporary conversation context and long-term saved information.
-- Retrieval results that can be traced to the stored source.
-- A small allow-list of registered tools with typed input/output schemas.
-- Validation and user confirmation before consequential actions.
-- No silent shell, filesystem, account or network actions merely because the model generated a command.
+With the chat command and the --memory-db option, the chat supports /remember TEXT, /recall QUERY, /memories and /forget ID. Relevant saved notes may be surfaced as explicit memory context during a turn. The CLI also provides qmini memory add, search, forget and export. Records can be individually deleted or exported to JSON.
 
-Memory or tool integration must not compromise the text-only model boundary or require a paid hosted service.
+Model-directed task execution remains a future, permission-controlled extension. It should use typed tool schemas and a small allow-list; consequential actions must require confirmation. No unrestricted shell, filesystem, account or network actions should occur merely because the model generated a command.
 
 ## 8. Hardware and deployment direction
 
@@ -214,6 +209,7 @@ The notebook and CLI contain the full tokenizer, data preparation, training, res
 - qmini/train.py — training, validation and resumable checkpoints.
 - qmini/generate.py — reference generation and terminal chat.
 - qmini/export.py — packed archive export and verification.
+- qmini/memory.py — opt-in local SQLite/FTS5 memory with explicit CRUD and JSON export.
 - qmini/native_kernel.cpp, qmini/native.py — native projection primitive and build helper.
 - configs/ — base and smoke configurations.
 - tests/ — model, causality, quantization, data, training, export and native tests.
@@ -229,6 +225,7 @@ The notebook and CLI contain the full tokenizer, data preparation, training, res
 - The packed archive is not yet a complete integer-only runtime.
 - The native kernel accelerates CPU linear projections only; convolution, normalization, embedding lookup and MoE dispatch remain on the PyTorch reference path.
 - There are no bundled trained weights or private datasets.
+- Local memory is stored in the path supplied by the user; protect that database as personal data and export/delete records deliberately.
 - The GitHub repository is public. Never commit credentials, private datasets, personal information or private checkpoints. Keep such artifacts in private storage.
 
 **Project principle:** build a truthful, testable, efficient text model first; add assistant capabilities only when the training data, implementation and evaluations support them.
