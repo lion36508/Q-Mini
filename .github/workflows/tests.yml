@@ -47,3 +47,4 @@ jobs:
           python -c "from qmini.config import QMiniConfig; from qmini.model import QMiniMoE; c=QMiniConfig.from_json('configs/qmini_research_134m.json'); n=QMiniMoE(c).parameter_report()['total']; print('Research profile parameters:', n); assert n == 134426200"
           python -m qmini.cli --help
           python -m qmini.cli memory --help
+          python scripts/benchmark.py --config configs/qmini_smoke.json --seq-len 8 --iterations 3 --warmup 1 --mode both

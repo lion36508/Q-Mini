@@ -233,7 +233,7 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 - qmini/export.py — packed archive export and verification.
 - qmini/memory.py — opt-in local SQLite/FTS5 memory with explicit CRUD and JSON export.
 - qmini/native_kernel.cpp, qmini/native.py — packed INT8/quaternary CPU projection, AArch64/NEON path, scalar fallback and backend detection.
-- scripts/benchmark.py — repeatable model-forward throughput and resource benchmark.
+- scripts/benchmark.py — repeatable full-forward, streaming prefill and cached autoregressive decode benchmark.
 - configs/ — compact base, 134M-class research and smoke configurations.
 - tests/ — model, causality, quantization, data, training, export and native tests.
 - docs/ — architecture, training, evaluation and project scope.
