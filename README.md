@@ -198,7 +198,7 @@ python -m qmini.cli audit --config configs/qmini_smoke.json
 3. Run the notebook from top to bottom. It mounts Drive, obtains the source, installs dependencies, trains the tokenizer, prepares data and runs a small smoke training before the base run.
 4. Keep artifacts in Google Drive/MyDrive/QMini/artifacts/ so they survive Colab runtime resets.
 
-The notebook and CLI contain the full tokenizer, data preparation, training, resume, generation and chat commands. The training step count is the target total optimizer step, not an extra number of steps after resume.
+The notebook and CLI contain the tokenizer, data preparation, training, resume, generation, chat and held-out evaluation commands. The training step count is the target total optimizer step, not an extra number of steps after resume.
 
 ## 11. Repository map
 
@@ -207,7 +207,8 @@ The notebook and CLI contain the full tokenizer, data preparation, training, res
 - qmini/quantization.py — STE fake quantization and quaternary packing.
 - qmini/tokenizer.py, qmini/data.py — local tokenizer and corpus pipeline.
 - qmini/train.py — training, validation and resumable checkpoints.
-- qmini/generate.py — reference generation and terminal chat.
+- qmini/generate.py — cached autoregressive generation and terminal chat.
+- qmini/evaluate.py — held-out language-model and prompt/reference evaluation.
 - qmini/export.py — packed archive export and verification.
 - qmini/memory.py — opt-in local SQLite/FTS5 memory with explicit CRUD and JSON export.
 - qmini/native_kernel.cpp, qmini/native.py — packed INT8/quaternary CPU projection, AArch64/NEON path, scalar fallback and backend detection.

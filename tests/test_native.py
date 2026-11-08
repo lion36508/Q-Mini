@@ -195,14 +195,14 @@ def test_native_wrapper_rejects_silent_dtype_narrowing(compiled_native_library):
     scales = np.ones(2, dtype=np.float32)
     activation_scales = np.ones(1, dtype=np.float32)
 
-    with pytest.raises(TypeError, match="already int8"):
+    with pytest.raises(TypeError, match="already be int8"):
         native.linear(
             np.ones((1, 4), dtype=np.int64),
             packed,
             scales,
             activation_scales,
         )
-    with pytest.raises(TypeError, match="already uint8"):
+    with pytest.raises(TypeError, match="already be uint8"):
         native.linear(
             np.ones((1, 4), dtype=np.int8),
             np.zeros((2, 1), dtype=np.int16),

@@ -4,6 +4,7 @@ import torch
 from .config import QMiniConfig
 from .data import prepare_token_streams
 from .generate import generate, interactive_chat, load_model
+from .evaluate import emit_report, evaluate_language_model, evaluate_task_file
 from .model import QMiniMoE
 
 def main():
@@ -143,6 +144,43 @@ def main():
     chat.set_defaults(func=lambda a: (
         interactive_chat(a.model_dir, a.max_new_tokens, a.memory_db) or 0
     ))
+
+    eval_lm = commands.add_parser("eval-lm", help="evaluate held-out language-model loss and expert usage")
+    eval_lm.add_argument("--model-dir", required=True)
+    eval_lm.add_argument("--tokens", required=True)
+    eval_lm.add_argument("--mask", default=None)
+    eval_lm.add_argument("--batch-size", type=int, default=2)
+    eval_lm.add_argument("--seq-len", type=int, default=512)
+    eval_lm.add_argument("--batches", type=int, default=100)
+    eval_lm.add_argument("--seed", type=int, default=42)
+    eval_lm.add_argument("--device", default=None)
+    eval_lm.add_argument("--output", default=None)
+    def do_eval_lm(a):
+        model, _tokenizer, _device = load_model(a.model_dir, a.device)
+        report = evaluate_language_model(
+            model, a.tokens, a.mask, a.batch_size, a.seq_len, a.batches, a.seed
+        )
+        emit_report(report, a.output)
+        return 0
+    eval_lm.set_defaults(func=do_eval_lm)
+
+    eval_tasks = commands.add_parser("eval-tasks", help="evaluate a JSONL prompt/reference set")
+    eval_tasks.add_argument("--model-dir", required=True)
+    eval_tasks.add_argument("--dataset", required=True)
+    eval_tasks.add_argument("--max-new-tokens", type=int, default=128)
+    eval_tasks.add_argument("--limit", type=int, default=None)
+    eval_tasks.add_argument("--thinking-steps", type=int, choices=range(1, 5), default=None)
+    eval_tasks.add_argument("--device", default=None)
+    eval_tasks.add_argument("--output", default=None)
+    def do_eval_tasks(a):
+        model, tokenizer, _device = load_model(a.model_dir, a.device)
+        report = evaluate_task_file(
+            model, tokenizer, a.dataset, a.max_new_tokens, a.limit, a.thinking_steps
+        )
+        emit_report(report, a.output)
+        return 0
+    eval_tasks.set_defaults(func=do_eval_tasks)
+
     args = parser.parse_args(); result = args.func(args); raise SystemExit(result if isinstance(result, int) else 0)
 
 if __name__ == "__main__": main()

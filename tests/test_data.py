@@ -3,8 +3,8 @@ import json
 import numpy as np
 import pytest
 
-from qmini.data import extract_text, iter_text_records, prepare_token_streams
-from qmini.tokenizer import train_tokenizer
+from qmini.data import _encode_record, extract_text, iter_text_records, prepare_token_streams
+from qmini.tokenizer import special_token_id, train_tokenizer
 
 
 def test_extract_chat_messages():
@@ -148,3 +148,67 @@ def test_structured_conversations_use_dedicated_role_and_end_tokens(tmp_path):
         assert mask[assistant_positions[0]] == 1
         assert mask[np.flatnonzero(token_ids == end_id)[-1]] == 1
     assert report["train_target_tokens"] > 0
+
+
+def test_chat_ending_with_unanswered_user_does_not_train_document_eos(tmp_path):
+    corpus = tmp_path / "tokenizer-source.jsonl"
+    rows = [
+        {"text": "First independent tokenizer training document with sufficient words."},
+        {"text": "Second independent tokenizer training document with sufficient words."},
+    ]
+    corpus.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    tokenizer = train_tokenizer(
+        [corpus], tmp_path / "tokenizer.json", vocab_size=300, min_frequency=1
+    )
+
+    conversation = {
+        "messages": [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier assistant answer"},
+            {"role": "user", "content": "A final unanswered question"},
+        ]
+    }
+    encoded = _encode_record(
+        conversation,
+        tokenizer,
+        special_token_id(tokenizer, "<bos>"),
+        special_token_id(tokenizer, "<eos>"),
+        "auto",
+    )
+    assert encoded is not None
+    token_ids, loss_mask = encoded
+    end_id = special_token_id(tokenizer, "<|end|>")
+    end_positions = np.flatnonzero(token_ids == end_id)
+
+    assert len(end_positions) == 2
+    assert loss_mask[end_positions[0]] == 1
+    assert loss_mask[end_positions[1]] == 0
+    assert loss_mask[-1] == 0
+
+
+def test_chat_ending_with_assistant_trains_document_eos(tmp_path):
+    corpus = tmp_path / "tokenizer-source.jsonl"
+    rows = [
+        {"text": "First independent tokenizer training document with sufficient words."},
+        {"text": "Second independent tokenizer training document with sufficient words."},
+    ]
+    corpus.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    tokenizer = train_tokenizer(
+        [corpus], tmp_path / "tokenizer.json", vocab_size=300, min_frequency=1
+    )
+    conversation = {
+        "messages": [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+        ]
+    }
+    encoded = _encode_record(
+        conversation,
+        tokenizer,
+        special_token_id(tokenizer, "<bos>"),
+        special_token_id(tokenizer, "<eos>"),
+        "auto",
+    )
+    assert encoded is not None
+    _token_ids, loss_mask = encoded
+    assert loss_mask[-1] == 1

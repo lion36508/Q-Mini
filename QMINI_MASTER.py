@@ -24,6 +24,8 @@ def usage() -> None:
     print("  python QMINI_MASTER.py train ...")
     print("  python QMINI_MASTER.py generate ...")
     print("  python QMINI_MASTER.py chat ...")
+    print("  python -m qmini.cli eval-lm --help")
+    print("  python -m qmini.cli eval-tasks --help")
     print("  python QMINI_MASTER.py verify-export --path MODEL.qmini.npz")
     print("  python QMINI_MASTER.py memory --db PATH add --text TEXT")
 

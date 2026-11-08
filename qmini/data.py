@@ -244,13 +244,14 @@ def iter_training_text_records(
             connection.close()
 
 
-def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool]:
-    """Return (text, target-loss) segments, structured flag, assistant-target flag."""
+def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool, bool]:
+    """Return segments, structured flag, any-assistant flag and final-assistant flag."""
     if isinstance(record, dict):
         messages = record.get("messages")
         if isinstance(messages, list):
             segments: list[tuple[str, bool]] = []
             has_assistant = False
+            final_message_is_assistant = False
             for message in messages:
                 if not isinstance(message, dict):
                     continue
@@ -260,6 +261,7 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
                     continue
                 is_assistant = role in ASSISTANT_ROLES
                 has_assistant = has_assistant or is_assistant
+                final_message_is_assistant = is_assistant
                 if role in ASSISTANT_ROLES:
                     control_role = "assistant"
                 elif role in {"user"}:
@@ -274,7 +276,7 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
                 segments.append((body + "\n", is_assistant))
                 segments.append(("<|end|>\n", is_assistant))
             if segments:
-                return segments, True, has_assistant
+                return segments, True, has_assistant, final_message_is_assistant
 
         user_fields = ("instruction", "input", "prompt", "question")
         assistant_fields = ("completion", "output", "answer", "response")
@@ -296,12 +298,12 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
                 ("<|assistant|>", True),
                 (assistant_text + "\n", True),
                 ("<|end|>\n", True),
-            ], True, True
+            ], True, True, True
 
     text = extract_text(record).strip()
     if not text:
         return [], False, False
-    return [(text, True)], False, True
+    return [(text, True)], False, True, True
 
 
 def _encode_record(
@@ -311,7 +313,7 @@ def _encode_record(
     eos_id: int,
     loss_mask_mode: str,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    segments, structured, has_assistant = _record_segments(record)
+    segments, structured, has_assistant, final_message_is_assistant = _record_segments(record)
     if not segments:
         return None
 
@@ -335,7 +337,7 @@ def _encode_record(
     eos_is_target = (
         loss_mask_mode == "all"
         or not structured
-        or (loss_mask_mode in {"auto", "assistant"} and has_assistant)
+        or (loss_mask_mode in {"auto", "assistant"} and final_message_is_assistant)
     )
     ids.append(eos_id)
     mask.append(int(eos_is_target))
