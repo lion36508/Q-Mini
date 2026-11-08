@@ -85,9 +85,58 @@ def main():
         from .export import verify_packed_export
         print(json.dumps(verify_packed_export(a.path), indent=2)); return 0
     verify_export.set_defaults(func=do_verify_export)
+    memory = commands.add_parser("memory", help="manage explicit local SQLite memories")
+    memory.add_argument("--db", required=True, help="local SQLite database path")
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+
+    memory_add = memory_commands.add_parser("add", help="save a note explicitly")
+    memory_add.add_argument("--text", required=True)
+    memory_add.add_argument("--tag", action="append", default=[])
+    def do_memory_add(a):
+        from .memory import LocalMemoryStore
+        store = LocalMemoryStore(a.db)
+        print(json.dumps(store.remember(a.text, tags=a.tag), ensure_ascii=False, indent=2))
+        return 0
+    memory_add.set_defaults(func=do_memory_add)
+
+    memory_search = memory_commands.add_parser("search", help="search saved notes")
+    memory_search.add_argument("--query", default="")
+    memory_search.add_argument("--limit", type=int, default=8)
+    def do_memory_search(a):
+        from .memory import LocalMemoryStore
+        print(json.dumps(
+            LocalMemoryStore(a.db).search(a.query, a.limit),
+            ensure_ascii=False, indent=2
+        ))
+        return 0
+    memory_search.set_defaults(func=do_memory_search)
+
+    memory_forget = memory_commands.add_parser("forget", help="delete one saved note by ID")
+    memory_forget.add_argument("--id", type=int, required=True)
+    def do_memory_forget(a):
+        from .memory import LocalMemoryStore
+        removed = LocalMemoryStore(a.db).forget(a.id)
+        print("deleted" if removed else "not-found")
+        return 0
+    memory_forget.set_defaults(func=do_memory_forget)
+
+    memory_export = memory_commands.add_parser("export", help="export memories to JSON")
+    memory_export.add_argument("--output", required=True)
+    def do_memory_export(a):
+        from .memory import LocalMemoryStore
+        target = LocalMemoryStore(a.db).export_json(a.output)
+        print(target)
+        return 0
+    memory_export.set_defaults(func=do_memory_export)
+
     chat = commands.add_parser("chat", help="interactive terminal chat")
-    chat.add_argument("--model-dir", required=True); chat.add_argument("--max-new-tokens", type=int, default=160)
-    chat.set_defaults(func=lambda a: (interactive_chat(a.model_dir, a.max_new_tokens) or 0))
+    chat.add_argument("--model-dir", required=True)
+    chat.add_argument("--max-new-tokens", type=int, default=160)
+    chat.add_argument("--memory-db", default=None,
+        help="opt-in local SQLite memory database; writes require /remember")
+    chat.set_defaults(func=lambda a: (
+        interactive_chat(a.model_dir, a.max_new_tokens, a.memory_db) or 0
+    ))
     args = parser.parse_args(); result = args.func(args); raise SystemExit(result if isinstance(result, int) else 0)
 
 if __name__ == "__main__": main()
