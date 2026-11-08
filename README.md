@@ -75,6 +75,27 @@ Token IDs
 
 With kernel width 10 and the configured dilations, the six main blocks have a theoretical receptive field of 568 tokens. The configured context is 512 tokens. Parameter count must always be read from the instantiated model using the sum of parameter tensor sizes; configuration changes alter the total.
 
+
+### Higher-capacity training profile
+
+The compact configs/qmini_base.json profile is retained for CPU smoke tests and low-resource development. The Colab notebook now trains with configs/qmini_research_134m.json, a larger from-scratch profile:
+
+| Setting | Research profile |
+|---|---:|
+| Vocabulary target | 8,192 |
+| Model width | 640 |
+| Expert hidden width | 1,024 |
+| Main causal blocks | 10 |
+| Experts per block | 8 |
+| Active experts | Top-1 |
+| Maximum context | 2,048 tokens |
+| Convolution kernel | 10 |
+| Dilations | 1 through 512, powers of two |
+| Shared refinement | 1–4 passes |
+| Weight alphabet | {-2, -1, +1, +2} |
+
+At the full 8,192-token vocabulary this shape has **134,426,200 parameters**, including its single shared refinement block. The audit command and CI assert the instantiated count; if the locally trained tokenizer produces a smaller vocabulary, the active config and actual count are correspondingly smaller. This is a 134M-class research model, not a claim of state-of-the-art assistant quality. That depends on corpus quality, tokens seen, training compute and held-out capability evaluation.
+
 ### Quantization — what it does and does not mean
 
 - Trainable master weights remain FP32 and are mapped to {-2, -1, +1, +2} during the fake-quantized forward pass using a straight-through estimator.
@@ -213,7 +234,7 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 - qmini/memory.py — opt-in local SQLite/FTS5 memory with explicit CRUD and JSON export.
 - qmini/native_kernel.cpp, qmini/native.py — packed INT8/quaternary CPU projection, AArch64/NEON path, scalar fallback and backend detection.
 - scripts/benchmark.py — repeatable model-forward throughput and resource benchmark.
-- configs/ — base and smoke configurations.
+- configs/ — compact base, 134M-class research and smoke configurations.
 - tests/ — model, causality, quantization, data, training, export and native tests.
 - docs/ — architecture, training, evaluation and project scope.
 - colab/ — Colab training notebook.

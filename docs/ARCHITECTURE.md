@@ -47,3 +47,10 @@ The native kernel covers dense linear projections only. AArch64/NEON builds use 
 ## Local memory boundary
 
 The qmini/memory.py module provides an optional local SQLite store. FTS5 indexes note content and tags when available; otherwise search falls back to literal substring matching. Writes happen only through explicit user commands. This subsystem is not a neural memory layer, does not alter model weights and does not grant arbitrary tool execution.
+
+
+## Higher-capacity profile
+
+The compact baseline is preserved in configs/qmini_base.json. For GPU training, configs/qmini_research_134m.json supplies width 640, expert hidden width 1,024, ten causal blocks, eight Top-1 experts per block, an 8,192-token target vocabulary and a 2,048-token configured context. The dilation schedule is 1, 2, 4, 8, 16, 32, 64, 128, 256 and 512.
+
+For the full 8,192-token vocabulary, the instantiated shape contains 134,426,200 parameters, including one shared refinement block. The CI audit computes this value from actual PyTorch parameter tensors. If tokenizer training produces fewer than 8,192 entries, the active config and model parameter count are adjusted to that actual vocabulary.

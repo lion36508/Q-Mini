@@ -178,3 +178,8 @@ Q-Mini must not be described as:
 - A system that has passed benchmarks unless results and test conditions are recorded.
 
 The project is successful when measured capabilities, reproducible training and a reliable local runtime catch up with the stated goals—not when the feature list becomes longer.
+
+
+## Capacity profile
+
+The compact 8M-class profile remains available for smoke tests and low-resource experiments. The repository also includes a 134M-class GPU research profile (width 640, hidden width 1,024, ten main blocks, eight experts, 8,192 target vocabulary and 2,048 context). Its full-vocabulary parameter count is verified by runtime audit. It is a larger training experiment, not a claim of general-purpose capability before training and evaluation.
