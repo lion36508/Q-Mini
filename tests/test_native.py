@@ -54,6 +54,7 @@ def test_native_wrapper_rejects_incompatible_shapes(tmp_path):
         check=True,
     )
     native = NativeKernel(library)
+    assert isinstance(native.uses_neon, bool)
     with pytest.raises(ValueError, match="one scale per input row"):
         native.linear(
             np.ones((2, 4), dtype=np.int8),

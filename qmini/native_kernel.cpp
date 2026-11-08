@@ -3,15 +3,100 @@
 #include <cstdint>
 #include <limits>
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define QMINI_HAS_NEON 1
+#else
+#define QMINI_HAS_NEON 0
+#endif
+
 #if defined(_WIN32)
 #define QMINI_EXPORT extern "C" __declspec(dllexport)
 #else
 #define QMINI_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-// Four packed 2-bit codes per output row: 00=-2, 01=-1, 10=+1, 11=+2.
-// The accumulator uses integer add/subtract/doubling; scales are applied once
-// after accumulation, avoiding a floating-point multiply in the inner loop.
+static inline int32_t qmini_decode_weight(const uint8_t* packed_row, int feature) {
+    const uint8_t packed = packed_row[feature / 4];
+    const uint8_t code = static_cast<uint8_t>(
+        (packed >> ((feature % 4) * 2)) & 0x03
+    );
+    switch (code) {
+        case 0: return -2;
+        case 1: return -1;
+        case 2: return 1;
+        default: return 2;
+    }
+}
+
+static int64_t qmini_accumulate_i8_q2(
+    const int8_t* input_row,
+    const uint8_t* packed_row,
+    int in_features
+) {
+#if QMINI_HAS_NEON
+    // Expand eight 2-bit weights at a time, multiply signed INT8 x {-2,-1,1,2},
+    // widen products, and pairwise-accumulate in INT32 lanes. Flush each 512
+    // input features into INT64 to keep the SIMD partial accumulator bounded.
+    int64_t accumulator = 0;
+    int32x4_t vector_sum = vdupq_n_s32(0);
+    alignas(8) int8_t unpacked_weights[8];
+    int vector_blocks = 0;
+    int feature = 0;
+
+    for (; feature + 8 <= in_features; feature += 8) {
+        for (int lane = 0; lane < 8; ++lane) {
+            unpacked_weights[lane] = static_cast<int8_t>(
+                qmini_decode_weight(packed_row, feature + lane)
+            );
+        }
+
+        const int8x8_t activations = vld1_s8(input_row + feature);
+        const int8x8_t weights = vld1_s8(unpacked_weights);
+        const int16x8_t products = vmull_s8(activations, weights);
+        vector_sum = vpadalq_s16(vector_sum, products);
+
+        if (++vector_blocks == 64) {
+            int32_t partial[4];
+            vst1q_s32(partial, vector_sum);
+            accumulator += static_cast<int64_t>(partial[0])
+                         + static_cast<int64_t>(partial[1])
+                         + static_cast<int64_t>(partial[2])
+                         + static_cast<int64_t>(partial[3]);
+            vector_sum = vdupq_n_s32(0);
+            vector_blocks = 0;
+        }
+    }
+
+    if (vector_blocks != 0) {
+        int32_t partial[4];
+        vst1q_s32(partial, vector_sum);
+        accumulator += static_cast<int64_t>(partial[0])
+                     + static_cast<int64_t>(partial[1])
+                     + static_cast<int64_t>(partial[2])
+                     + static_cast<int64_t>(partial[3]);
+    }
+
+    // Scalar tail for dimensions not divisible by eight.
+    for (; feature < in_features; ++feature) {
+        accumulator += static_cast<int64_t>(input_row[feature]) *
+                       qmini_decode_weight(packed_row, feature);
+    }
+    return accumulator;
+#else
+    int64_t accumulator = 0;
+    for (int feature = 0; feature < in_features; ++feature) {
+        accumulator += static_cast<int64_t>(input_row[feature]) *
+                       qmini_decode_weight(packed_row, feature);
+    }
+    return accumulator;
+#endif
+}
+
+// Packed row layout: four signed quaternary values per byte:
+// 00=-2, 01=-1, 10=+1, 11=+2.
+// The inner product uses integer accumulation; scales and bias are applied once
+// after the accumulator is reduced. ARM builds use NEON when the target supports it.
 QMINI_EXPORT int qmini_linear_i8(
     const int8_t* input,
     const uint8_t* packed_weights,
@@ -49,7 +134,6 @@ QMINI_EXPORT int qmini_linear_i8(
     const int bytes_per_row = (in_features + 3) / 4;
     for (int row = 0; row < rows; ++row) {
         for (int output_index = 0; output_index < out_features; ++output_index) {
-            int64_t accumulator = 0;
             const uint8_t* weight_row =
                 packed_weights + static_cast<std::size_t>(output_index) *
                 static_cast<std::size_t>(bytes_per_row);
@@ -57,22 +141,8 @@ QMINI_EXPORT int qmini_linear_i8(
                 input + static_cast<std::size_t>(row) *
                 static_cast<std::size_t>(in_features);
 
-            for (int feature = 0; feature < in_features; ++feature) {
-                const uint8_t packed = weight_row[feature / 4];
-                const uint8_t code = static_cast<uint8_t>(
-                    (packed >> ((feature % 4) * 2)) & 0x03
-                );
-                const int32_t value = static_cast<int32_t>(input_row[feature]);
-                int32_t term = 0;
-                switch (code) {
-                    case 0: term = -(value + value); break; // -2
-                    case 1: term = -value; break;           // -1
-                    case 2: term = value; break;            // +1
-                    case 3: term = value + value; break;    // +2
-                    default: return 6;
-                }
-                accumulator += static_cast<int64_t>(term);
-            }
+            const int64_t accumulator =
+                qmini_accumulate_i8_q2(input_row, weight_row, in_features);
 
             const float offset = bias ? bias[output_index] : 0.0f;
             const float scaled = static_cast<float>(accumulator) *
@@ -83,4 +153,8 @@ QMINI_EXPORT int qmini_linear_i8(
         }
     }
     return 0;
+}
+
+QMINI_EXPORT int qmini_kernel_has_neon() {
+    return QMINI_HAS_NEON;
 }

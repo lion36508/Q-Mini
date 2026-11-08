@@ -40,6 +40,10 @@ class NativeKernel:
             ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ]
         self.function.restype = ctypes.c_int
+        self.neon_function = self.library.qmini_kernel_has_neon
+        self.neon_function.argtypes = []
+        self.neon_function.restype = ctypes.c_int
+        self.uses_neon = bool(self.neon_function())
 
     def linear(self, activations_i8, packed_weights, weight_scales, activation_scales, bias=None):
         x = np.ascontiguousarray(activations_i8, dtype=np.int8)
