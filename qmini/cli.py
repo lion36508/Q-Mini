@@ -23,6 +23,10 @@ def main():
         print("Parameters:", f"{model.parameter_report()['total']:,}")
         print("Main receptive field:", cfg.main_receptive_field(), "tokens; max context:", cfg.max_context)
         print("C++ compiler:", shutil.which("clang++") or shutil.which("g++") or "not found")
+        from .native import native_kernel_status
+        native = native_kernel_status()
+        print("CPU projection backend:", native["backend"])
+        print("Native library:", native["path"])
         print("Attention/QKV: absent by design"); return 0
     audit.set_defaults(func=do_audit)
     tok = commands.add_parser("tokenizer", help="train a local BPE tokenizer")

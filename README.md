@@ -81,8 +81,9 @@ With kernel width 10 and the configured dilations, the six main blocks have a th
 - Activations use per-token AbsMax INT8 fake quantization, also with an STE.
 - Export packs four 2-bit weight codes per byte and stores row scales; selected metadata tensors are stored separately.
 - FP32 master weights, gradients and optimizer states are still used during ordinary training. The small packed archive size is **not** the training RAM requirement.
-- The C++17 kernel implements a packed-quaternary INT8 linear-projection primitive. It is not yet the complete model graph and is not currently wired into the full QMiniMoE forward path.
-- The packed NPZ archive is a storage/export format. The current reference generation/chat path loads model.pt; it does not yet run directly from the packed archive.
+- The C++17 kernel is now wired into `QLinear` and the tied language-model output projection for CPU evaluation/inference when `qmini/libqmini_kernel.so` is present. It consumes per-token INT8 activations and packed quaternary weights, using integer accumulation in the native inner loop. If the library is absent, Q-Mini transparently uses the PyTorch reference path.
+- The causal depthwise convolution, RMSNorm, embedding lookup and sparse dispatch are still executed by PyTorch. This is a hybrid native/PyTorch CPU path, not a complete integer-only model runtime.
+- The packed NPZ archive remains a storage/export format; direct execution from that archive is not yet implemented. Reference model loading still uses `model.pt`.
 
 The shared refinement block is a learned hidden-state update that reuses parameters. It is not a symbolic theorem prover and does not guarantee correct reasoning. More refinement passes increase inference compute and must be evaluated.
 
@@ -226,7 +227,7 @@ The notebook and CLI contain the full tokenizer, data preparation, training, res
 - The current baseline is a compact research model, not a large foundation model or a claim of state-of-the-art performance.
 - FP32 master weights and optimizer states are used in training.
 - The packed archive is not yet a complete integer-only runtime.
-- The current native kernel is not integrated into the full model graph.
+- The native kernel accelerates CPU linear projections only; convolution, normalization, embedding lookup and MoE dispatch remain on the PyTorch reference path.
 - There are no bundled trained weights or private datasets.
 - The GitHub repository is public. Never commit credentials, private datasets, personal information or private checkpoints. Keep such artifacts in private storage.
 
