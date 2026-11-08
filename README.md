@@ -95,7 +95,7 @@ The shared refinement block is a learned hidden-state update that reuses paramet
 | Reasoning | Shared latent refinement mechanism and next-token training | Demonstrated math, logic and multi-step problem-solving accuracy |
 | Coding | General text-generation path can generate code | Dedicated code data, debugging evaluations and executable test-based scoring |
 | Data | Local BPE tokenizer and text/chat data readers | Larger curated, deduplicated, licensed and balanced corpora |
-| Training | AdamW, gradient accumulation, available mixed precision, evaluation and resumable checkpoints | Longer curriculum training and carefully measured instruction tuning |
+| Training | AdamW, gradient accumulation, available mixed precision, assistant-only loss masks for structured chat/Q&A, evaluation and fingerprinted resumable checkpoints | Longer curriculum training and measured instruction tuning |
 | Experts | Sparse Top-1 MoE and router/load statistics | Verified useful specialization without expert collapse |
 | Quantization | Quaternary/INT8 fake quantization and packed export | Calibrated, numerically verified low-bit execution |
 | Memory | No persistent user-memory subsystem yet | Optional local, user-controlled memory with inspect, edit and delete controls |
@@ -126,7 +126,8 @@ Keep validation documents separate from training documents. Do not treat unverif
 - Discover supported local data files: TXT, Markdown, JSON, JSONL/NDJSON, CSV and optional Parquet.
 - Train a local byte-level BPE tokenizer from the selected corpus.
 - Convert documents into role-marked text where appropriate.
-- Split at document level and create uint16 token streams.
+- Split at document level, de-duplicate exact documents using a disk-backed index, and create uint16 token streams with aligned uint8 loss masks.
+- In `auto` mode, plain text receives ordinary next-token loss while structured chat/Q&A applies supervised loss to assistant response spans and leaves user/system text as context.
 - Run a tiny smoke training before the full run.
 - Train next-token prediction with cross-entropy and router load-balancing loss.
 - Use AdamW, gradient accumulation, warmup/cosine scheduling and available GPU mixed precision.
