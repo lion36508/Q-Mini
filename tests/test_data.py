@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pytest
 
 from qmini.data import extract_text, iter_text_records, prepare_token_streams
@@ -53,8 +54,50 @@ def test_prepare_deduplicates_and_guarantees_nonempty_splits(tmp_path):
     assert report["valid_documents"] == 1
     assert report["train_tokens"] > 0
     assert report["valid_tokens"] > 0
-    assert report["format"] == "qmini-token-stream-v2"
+    assert report["format"] == "qmini-token-stream-v3"
     assert (output / "dataset.json").is_file()
+
+    for split in ("train", "valid"):
+        tokens = np.memmap(output / f"{split}.bin", mode="r", dtype=np.uint16)
+        mask = np.memmap(output / f"{split}.mask.bin", mode="r", dtype=np.uint8)
+        assert len(tokens) == len(mask)
+        assert set(np.unique(mask)).issubset({0, 1})
+        assert int(mask.sum()) > 0
 
     with pytest.raises(FileExistsError):
         prepare_token_streams([corpus], tokenizer_path, output, valid_fraction=0.01)
+
+
+def test_assistant_loss_mask_excludes_user_prompt_tokens(tmp_path):
+    corpus = tmp_path / "conversations.jsonl"
+    conversations = [
+        {"messages": [
+            {"role": "user", "content": "What is a star?"},
+            {"role": "assistant", "content": "A star is a luminous sphere of plasma."},
+        ]},
+        {"messages": [
+            {"role": "user", "content": "Explain gravity."},
+            {"role": "assistant", "content": "Gravity is the attraction between masses."},
+        ]},
+    ]
+    corpus.write_text(
+        "\n".join(json.dumps(item) for item in conversations),
+        encoding="utf-8",
+    )
+    tokenizer_path = tmp_path / "conversation-tokenizer.json"
+    train_tokenizer([corpus], tokenizer_path, vocab_size=400, min_frequency=1)
+    output = tmp_path / "assistant-targets"
+
+    report = prepare_token_streams(
+        [corpus], tokenizer_path, output,
+        valid_fraction=0.01, loss_mask_mode="assistant",
+    )
+    assert report["loss_mask_mode"] == "assistant"
+    assert report["train_target_tokens"] > 0
+    assert report["valid_target_tokens"] > 0
+
+    for split in ("train", "valid"):
+        tokens = np.memmap(output / f"{split}.bin", mode="r", dtype=np.uint16)
+        mask = np.memmap(output / f"{split}.mask.bin", mode="r", dtype=np.uint8)
+        assert len(tokens) == len(mask)
+        assert 0 < int(mask.sum()) < len(mask)
