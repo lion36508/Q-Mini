@@ -31,3 +31,9 @@ runs/
 
 # Notebook runtime files
 .ipynb_checkpoints/
+
+# Local personal memory databases (keep out of public Git history)
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db

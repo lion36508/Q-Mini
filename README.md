@@ -155,7 +155,7 @@ Use fixed datasets, prompts and scoring methods when comparing revisions. Report
 
 **Local memory is implemented as an optional subsystem outside the neural model.** It uses SQLite for persistence and FTS5 full-text search when the local SQLite build provides it; a literal-substring fallback is available when FTS5 is absent. Memory is never written automatically.
 
-With the chat command and the --memory-db option, the chat supports /remember TEXT, /recall QUERY, /memories and /forget ID. Relevant saved notes may be surfaced as explicit memory context during a turn. The CLI also provides qmini memory add, search, forget and export. Records can be individually deleted or exported to JSON.
+Start chat with `python -m qmini.cli chat --model-dir PATH --memory-db PATH_TO_LOCAL_SQLITE`. The chat supports `/remember TEXT`, `/recall QUERY`, `/memories` and `/forget ID`. Relevant saved notes may be surfaced as explicit memory context during a turn. The CLI also provides `python -m qmini.cli memory --db PATH add --text TEXT`, `search --query QUERY`, `forget --id ID` and `export --output BACKUP.json`. Records can be individually deleted or exported to JSON. SQLite database files are ignored by Git.
 
 Model-directed task execution remains a future, permission-controlled extension. It should use typed tool schemas and a small allow-list; consequential actions must require confirmation. No unrestricted shell, filesystem, account or network actions should occur merely because the model generated a command.
 
