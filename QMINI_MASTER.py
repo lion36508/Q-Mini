@@ -25,6 +25,7 @@ def usage() -> None:
     print("  python QMINI_MASTER.py generate ...")
     print("  python QMINI_MASTER.py chat ...")
     print("  python QMINI_MASTER.py verify-export --path MODEL.qmini.npz")
+    print("  python QMINI_MASTER.py memory --db PATH add --text TEXT")
 
 
 def main() -> int:
