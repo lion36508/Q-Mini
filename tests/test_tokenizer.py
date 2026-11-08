@@ -43,7 +43,7 @@ def test_tokenizer_iterator_excludes_validation_and_duplicate_documents(tmp_path
         for index in range(100)
         if not _is_validation(
             f"training source document {index} contains enough words and details",
-            0.5,
+            0.49,
         )
     )
     valid_doc = next(
@@ -51,7 +51,7 @@ def test_tokenizer_iterator_excludes_validation_and_duplicate_documents(tmp_path
         for index in range(100)
         if _is_validation(
             f"held out validation document {index} contains unique held out material",
-            0.5,
+            0.49,
         )
     )
     corpus = tmp_path / "mixed.txt"
@@ -59,7 +59,7 @@ def test_tokenizer_iterator_excludes_validation_and_duplicate_documents(tmp_path
         train_doc + "\n\n" + valid_doc + "\n\n" + train_doc,
         encoding="utf-8",
     )
-    rows = list(iter_training_text_records([corpus], valid_fraction=0.5))
+    rows = list(iter_training_text_records([corpus], valid_fraction=0.49))
     assert rows == [train_doc]
     assert valid_doc not in rows
 
