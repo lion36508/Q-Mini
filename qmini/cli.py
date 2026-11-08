@@ -38,7 +38,7 @@ def main():
     tok.set_defaults(func=do_tokenizer)
     prep = commands.add_parser("prepare", help="prepare immutable train and validation token streams")
     prep.add_argument("--data-dir", nargs="+", required=True); prep.add_argument("--tokenizer", required=True)
-    prep.add_argument("--output-dir", required=True); prep.add_argument("--valid-fraction", type=float, default=0.01)
+    prep.add_argument("--output-dir", required=True); prep.add_argument("--valid-fraction", type=float, default=0.02)
     prep.set_defaults(func=lambda a: (print(json.dumps(prepare_token_streams(a.data_dir, a.tokenizer, a.output_dir, a.valid_fraction), indent=2)) or 0))
     train = commands.add_parser("train", help="train from scratch or resume a checkpoint")
     for flag in ("config", "train-bin", "valid-bin", "tokenizer", "output-dir"): train.add_argument("--" + flag, required=True)
@@ -47,6 +47,10 @@ def main():
     train.add_argument("--lr", type=float, default=3e-4); train.add_argument("--weight-decay", type=float, default=0.1)
     train.add_argument("--eval-every", type=int, default=250); train.add_argument("--save-every", type=int, default=250)
     train.add_argument("--eval-batches", type=int, default=20); train.add_argument("--resume", action="store_true")
+    train.add_argument("--extend-schedule", action="store_true",
+        help="explicitly extend the saved learning-rate schedule")
+    train.add_argument("--allow-legacy-resume", action="store_true",
+        help="resume a checkpoint without data fingerprints after manual verification")
     def do_train(a):
         from .train import train_model
         train_model(QMiniConfig.from_json(a.config), a.train_bin, a.valid_bin, a.output_dir,
