@@ -1,53 +1,232 @@
-# Q-Mini — Quaternary CausalConv-MoE
+# Q-Mini — Text-Only CausalConv-MoE Language Model
 
-Q-Mini is a from-scratch decoder-only language model, not an Android app, hosted-chatbot wrapper or fine-tune of downloaded pretrained weights. PyTorch supplies tensor operations, autograd and optimization. A byte-level BPE tokenizer is trained locally from the user's permitted corpus; no pretrained model weights or paid APIs are required.
+**Q-Mini is a from-scratch language-model research project aimed at becoming a compact, capable, offline-friendly text assistant.** It is not an Android app, a hosted-chatbot wrapper, or a fine-tune of downloaded pretrained weights. The model starts from random initialization. PyTorch supplies tensor operations, automatic differentiation and optimization; the tokenizer is trained locally from permitted corpus data.
 
-## Architecture lock
+> **Current status:** the repository contains an executable small-model baseline, training and data pipeline, reference text generation, packed-weight export utilities, a C++ projection primitive, tests and CI. It does **not** yet contain a trained, generally capable assistant, a complete packed-integer runtime, a finished Android app, persistent personal memory or unrestricted autonomous tool execution. This README separates implemented code from long-term goals.
 
-- Six causal blocks; width 256; expert hidden width 384; vocabulary target 4,096; context 512.
-- Four feed-forward experts per block; sparse Top-1 token routing.
-- Causal gated depthwise convolution with dilations 1, 2, 4, 8, 16, 32.
-- One shared refinement block reused for 1–4 inference steps.
-- Quaternary weights {-2, -1, +1, +2}; FP32 master weights with a straight-through estimator (STE).
-- Per-token AbsMax INT8 activation fake quantization with STE.
-- RMSNorm, residual paths, next-token cross-entropy and router load-balancing loss.
-- No Transformer self-attention, no Q/K/V projections, no dot-product attention and no retrieval-attention.
+[![Q-Mini CI](https://github.com/lion36508/Q-Mini/actions/workflows/tests.yml/badge.svg)](https://github.com/lion36508/Q-Mini/actions/workflows/tests.yml)
 
-The theoretical receptive field of the six main convolution blocks is 568 tokens with kernel width 10. Exact parameter count is computed from the instantiated model, not hard-coded to an experimental target.
+## 1. Project vision
 
-## Repository
+The long-term goal is to train Q-Mini into a useful general-purpose **text assistant** that can understand user instructions, maintain coherent conversations, explain difficult topics, solve structured problems, assist with programming and help users work through technical tasks.
 
-QMINI_MASTER.py is the project entry point. qmini/ contains model, quantization, packed export, tokenizer, data, trainer, inference and CLI. configs/ contains base and smoke profiles. tests/ checks causal behavior, routing gradients, quantization, data parsing, training/checkpoint resume, tokenizer round-trip, generation and C++ parity. docs/ describes architecture, training and evaluation. colab/ contains a Google Colab pipeline. .github/workflows/ runs tests on pushes and pull requests.
+Intended capability areas:
 
-## Local setup
+- **Conversation and language:** multi-turn dialogue, instruction following, context-aware answers, explanations, summaries, rewriting and question answering.
+- **Reasoning and problem solving:** structured problem decomposition, logic, comparisons, planning and checking intermediate results.
+- **Mathematics and science:** arithmetic, algebra, geometry, basic statistics, physics, chemistry, scientific concepts and engineering explanations.
+- **Programming and software engineering:** code explanation, small program generation, debugging, algorithm review, test generation and development workflows.
+- **Technical knowledge:** computers, operating systems, electronics, hardware, networks, software tools and engineering concepts.
+- **Text and document work:** summarization, classification, extraction, transformation and answers grounded in supplied text.
+- **Multilingual communication:** language coverage developed from verified training data, with English and Indian-language coverage as important evaluation targets. Fluency must be demonstrated by held-out tests, not assumed from tokenizer support.
+- **Efficient local use:** progressively reduce inference cost and memory footprint so a trained model can run without a paid hosted inference API.
 
-    python -m venv .venv
-    source .venv/bin/activate
-    python -m pip install -e ".[dev]"
-    pytest -q
-    python QMINI_MASTER.py verify
-    python -m qmini.cli audit --config configs/qmini_smoke.json
+These are **training and product objectives**, not claims that the current random-initialized baseline already performs these tasks well.
 
-## Google Colab
+## 2. Non-negotiable design constraints
 
-Place licensed dataset files in Google Drive/MyDrive/QMini/datasets/. Open colab/QMini_Training.ipynb, select a GPU runtime and run the cells in order. Tokenizer, token streams, checkpoints, metrics and exports are stored in Google Drive/MyDrive/QMini/artifacts/, not in this public repository.
+1. **Text-only model.** Q-Mini is for text and language. Image understanding, image generation, vision encoders, video understanding and multimodal branches are outside this model's scope.
+2. **No Transformer self-attention.** No Q/K/V projections, dot-product attention, softmax attention or retrieval-attention modules.
+3. **Causal sequence processing.** A token at a future position must never influence an earlier position. The sequence mixer is a left-padded causal 1D depthwise convolution. This is a text-sequence operation, not an image CNN.
+4. **From-scratch training.** Do not silently load or fine-tune third-party pretrained model weights. The tokenizer is trained locally from the selected corpus.
+5. **Sparse expert computation.** Use learned Top-1 routing across the configured feed-forward experts in the current baseline; monitor expert usage rather than assuming specialization.
+6. **Low-bit research path.** Use quaternary weights and INT8 fake-quantized activations with an STE during model training. Clearly distinguish fake quantization, packed storage and true integer inference.
+7. **Reproducible development.** Version architecture/configuration, test causal behavior, record data provenance, keep evaluation data held out and report actual parameter counts and runtime measurements.
+8. **Free/open-source-first development.** Prefer open-source libraries and local execution. Do not make a paid hosted API or proprietary model service a required dependency.
 
-Example commands after installation:
+## 3. Current architecture baseline
 
-    python -m qmini.cli tokenizer --data-dir /content/drive/MyDrive/QMini/datasets --output /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --vocab-size 4096 --config-output /content/drive/MyDrive/QMini/artifacts/qmini_active_config.json
-    python -m qmini.cli prepare --data-dir /content/drive/MyDrive/QMini/datasets --tokenizer /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --output-dir /content/drive/MyDrive/QMini/artifacts/tokens
-    python -m qmini.cli train --config /content/drive/MyDrive/QMini/artifacts/qmini_active_config.json --train-bin /content/drive/MyDrive/QMini/artifacts/tokens/train.bin --valid-bin /content/drive/MyDrive/QMini/artifacts/tokens/valid.bin --tokenizer /content/drive/MyDrive/QMini/artifacts/tokenizer/tokenizer.json --output-dir /content/drive/MyDrive/QMini/artifacts/runs/base --steps 10000 --batch-size 2 --seq-len 512 --grad-accum 8
+The current configuration is a compact research baseline, not a claimed 5B or production-scale model.
 
-The final run exports final_model/model.qmini.npz with packed 2-bit quaternary tensors and FP16 bias/norm tensors; validate it with python -m qmini.cli verify-export --path /path/to/final_model/model.qmini.npz. Resume with --resume; the step value is the target total optimizer step, not an extra increment. Start with a smoke run and inspect actual GPU memory before scaling batch or sequence length.
+| Component | Current baseline |
+|---|---:|
+| Vocabulary target | 4,096; actual tokenizer size is written into active config |
+| Model width | 256 |
+| Expert hidden width | 384 |
+| Main causal blocks | 6 |
+| Experts per block | 4 |
+| Active experts per token | Top-1 |
+| Maximum context | 512 tokens |
+| Convolution kernel width | 10 |
+| Convolution dilations | 1, 2, 4, 8, 16, 32 |
+| Shared refinement | One block reused for 1–4 passes |
+| Weight alphabet | {-2, -1, +1, +2} |
+| Activation quantization | Per-token AbsMax INT8 fake quantization |
 
-## Important inference distinction
+### Forward path
 
-The current reference load_model/generate/chat path loads final_model/model.pt, a full-precision PyTorch state dictionary. The packed model.qmini.npz is a quantized storage/export artifact and is validated by the export checker; the reference chat path does not yet execute directly from that packed archive. QLinear uses fake quantization for quantization-aware training, not a true integer-only PyTorch GEMM.
+~~~text
+Token IDs
+  -> Quaternary token embedding
+  -> Six Q-Mini causal blocks
+       -> RMSNorm
+       -> Quantized content/gate projection
+       -> Left-padded depthwise causal convolution
+       -> SiLU(content) * sigmoid(gate)
+       -> Output projection + residual
+       -> RMSNorm
+       -> Sparse Top-1 expert router
+       -> Selected expert MLP + residual
+  -> Shared refinement block (1–4 iterations)
+  -> Final RMSNorm
+  -> Tied embedding projection
+  -> Next-token logits
+~~~
 
-## Native kernel and mobile boundary
+With kernel width 10 and the configured dilations, the six main blocks have a theoretical receptive field of 568 tokens. The configured context is 512 tokens. Parameter count must always be read from the instantiated model using the sum of parameter tensor sizes; configuration changes alter the total.
 
-bash scripts/build_native_kernel.sh builds an optional C++17 packed-quaternary INT8 linear-projection primitive. That primitive is tested independently, but it is not yet wired into QMiniMoE's complete forward graph and is not a complete native model runtime. Full ARM64 inference still needs kernels for embeddings, causal convolution, normalization, sparse expert dispatch and output projection, plus numerical parity tests on actual devices.
+### Quantization — what it does and does not mean
 
-## Limits and honest status
+- Trainable master weights remain FP32 and are mapped to {-2, -1, +1, +2} during the fake-quantized forward pass using a straight-through estimator.
+- Activations use per-token AbsMax INT8 fake quantization, also with an STE.
+- Export packs four 2-bit weight codes per byte and stores row scales; selected metadata tensors are stored separately.
+- FP32 master weights, gradients and optimizer states are still used during ordinary training. The small packed archive size is **not** the training RAM requirement.
+- The C++17 kernel implements a packed-quaternary INT8 linear-projection primitive. It is not yet the complete model graph and is not currently wired into the full QMiniMoE forward path.
+- The packed NPZ archive is a storage/export format. The current reference generation/chat path loads model.pt; it does not yet run directly from the packed archive.
 
-A randomly initialized model is not a capable assistant. Quality depends on corpus rights and quality, number of tokens, optimization, training duration and independent held-out evaluation. The shared refinement loop is learned hidden-state refinement, not a symbolic theorem prover. Training uses FP32 master weights and optimizer state; a 2-bit export does not mean 2-bit training RAM. This repository includes source code and tests, not private datasets or trained checkpoints. The GitHub repository is public: never commit credentials, personal data, private corpora or checkpoints.
+The shared refinement block is a learned hidden-state update that reuses parameters. It is not a symbolic theorem prover and does not guarantee correct reasoning. More refinement passes increase inference compute and must be evaluated.
+
+## 4. Implemented now vs. intended later
+
+| Area | Implemented in this repository | Longer-term objective |
+|---|---|---|
+| Language model | From-scratch causal-convolution MoE baseline | Improve language quality through measured training |
+| Conversation | Reference text generation and terminal multi-turn chat | Reliable, context-aware assistant dialogue |
+| Reasoning | Shared latent refinement mechanism and next-token training | Demonstrated math, logic and multi-step problem-solving accuracy |
+| Coding | General text-generation path can generate code | Dedicated code data, debugging evaluations and executable test-based scoring |
+| Data | Local BPE tokenizer and text/chat data readers | Larger curated, deduplicated, licensed and balanced corpora |
+| Training | AdamW, gradient accumulation, available mixed precision, evaluation and resumable checkpoints | Longer curriculum training and carefully measured instruction tuning |
+| Experts | Sparse Top-1 MoE and router/load statistics | Verified useful specialization without expert collapse |
+| Quantization | Quaternary/INT8 fake quantization and packed export | Calibrated, numerically verified low-bit execution |
+| Memory | No persistent user-memory subsystem yet | Optional local, user-controlled memory with inspect, edit and delete controls |
+| Tools/tasks | CLI for project operations; no model-controlled general tool executor | Permission-gated registered tools for carefully scoped tasks |
+| Mobile | Standalone C++ projection primitive | Complete ARM64 runtime, integrated kernels and measured on-device inference |
+| Multilingual | Tokenizer and text pipeline support Unicode text | Language-specific training and held-out language evaluations |
+
+A feature in the right-hand column is a roadmap item, not an existing capability.
+
+## 5. Training and learning plan
+
+A chat-only corpus is insufficient for the complete target. Training data should be versioned by source, license, language, quality and task family.
+
+### Suggested curriculum
+
+1. **Language foundation:** clean, deduplicated, well-formed text with known provenance and permitted licenses.
+2. **Technical and educational material:** mathematics, logic, science, programming, engineering, documentation and explanations.
+3. **Instruction and conversation:** role-marked multi-turn examples, clear task instructions, context retention and grounded responses.
+4. **Reasoning practice:** verified arithmetic, algebra, logic, structured problem solving and worked explanations with checked answers.
+5. **Programming practice:** code explanation, algorithm design, debugging examples, test generation and code-review cases with verified expected outcomes.
+6. **Safety and calibration:** uncertainty, correction, safe boundaries, refusal examples and instruction hierarchy.
+7. **Mixed replay:** continue mixing core language examples with specialist skills to reduce catastrophic forgetting.
+
+Keep validation documents separate from training documents. Do not treat unverified synthetic answers as ground truth. Respect dataset licenses and remove private or sensitive data.
+
+### Training pipeline
+
+- Discover supported local data files: TXT, Markdown, JSON, JSONL/NDJSON, CSV and optional Parquet.
+- Train a local byte-level BPE tokenizer from the selected corpus.
+- Convert documents into role-marked text where appropriate.
+- Split at document level and create uint16 token streams.
+- Run a tiny smoke training before the full run.
+- Train next-token prediction with cross-entropy and router load-balancing loss.
+- Use AdamW, gradient accumulation, warmup/cosine scheduling and available GPU mixed precision.
+- Save model, optimizer, configuration and RNG state so a compatible run can resume.
+- Evaluate on held-out data and retain JSONL training metrics.
+
+## 6. Evaluation: capability must be measured
+
+A bigger model, more experts or additional refinement steps do not automatically make a better assistant. Record:
+
+- Validation cross-entropy and perplexity, tokens seen and training steps.
+- Arithmetic/math exact-match and numeric-answer accuracy.
+- Logic and multi-step task accuracy using held-out problems.
+- Instruction adherence and multi-turn conversation consistency.
+- Language-wise performance and invalid/repetitive-output rates.
+- Code generation pass rate on sandboxed unit tests, not just subjective examples.
+- Router token counts per expert and signs of starvation/collapse.
+- Tokens per second, peak RAM/VRAM, cold-start time, model artifact size and thermal stability.
+- Quantized-vs-reference numerical error and generation-quality change.
+
+Use fixed datasets, prompts and scoring methods when comparing revisions. Report sample counts and limitations; do not claim benchmark results from training data or cherry-picked samples.
+
+## 7. Memory and task execution — future, permission-controlled work
+
+Persistent memory and model-directed task tools are **not implemented in the current Q-Mini core**. They are possible later additions around the language model:
+
+- Optional local memory that the user can inspect, edit, export and delete.
+- Explicit separation between temporary conversation context and long-term saved information.
+- Retrieval results that can be traced to the stored source.
+- A small allow-list of registered tools with typed input/output schemas.
+- Validation and user confirmation before consequential actions.
+- No silent shell, filesystem, account or network actions merely because the model generated a command.
+
+Memory or tool integration must not compromise the text-only model boundary or require a paid hosted service.
+
+## 8. Hardware and deployment direction
+
+**Development and training:** GitHub is the source of truth for code, configuration, tests and documentation. Google Colab is the GPU training environment. Google Drive is the recommended location for datasets, tokenizer artifacts, token streams, checkpoints, logs and model exports.
+
+**Local inference:** begin with the PyTorch reference path and measure CPU performance honestly. The current C++ projection primitive is only one component.
+
+**Android ARM64 / Termux (later phase):** the target is an offline-capable native inference library or command-line runtime. It requires compatible implementations for embedding lookup, quantized projections, causal depthwise convolution, RMSNorm, sparse expert dispatch and the output head. Each native component must be checked against the reference implementation and benchmarked on real devices. This repository does not currently build an APK or a complete Android runtime.
+
+## 9. Roadmap
+
+- **Phase A — Core correctness:** architecture invariants, causal tests, parameter audit, tokenizer/data validation, smoke training and safe checkpoint resume.
+- **Phase B — Training quality:** curated language/technical corpora, longer runs, held-out validation, router diagnostics and repeatable checkpoints.
+- **Phase C — Assistant competence:** instruction and multi-turn data, mathematics/logic, science and programming curricula, capability-specific evaluations and calibration.
+- **Phase D — Efficient inference:** packed-format validation, quantized/reference comparisons, optimized kernels and measured CPU performance.
+- **Phase E — Local assistant extensions:** optional user-controlled memory and permission-gated tools, only after core model behavior is reliable.
+- **Phase F — ARM64 deployment:** complete native graph, differential tests, performance and memory measurements on supported phones.
+
+Each phase should be accepted using tests and measurements, not by adding a feature name to the README.
+
+## 10. Quick start
+
+### Local environment
+
+~~~bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+pytest -q
+python QMINI_MASTER.py verify
+python -m qmini.cli audit --config configs/qmini_smoke.json
+~~~
+
+### Google Colab
+
+1. Put permitted training files in Google Drive/MyDrive/QMini/datasets/.
+2. Open colab/QMini_Training.ipynb and select an available GPU runtime.
+3. Run the notebook from top to bottom. It mounts Drive, obtains the source, installs dependencies, trains the tokenizer, prepares data and runs a small smoke training before the base run.
+4. Keep artifacts in Google Drive/MyDrive/QMini/artifacts/ so they survive Colab runtime resets.
+
+The notebook and CLI contain the full tokenizer, data preparation, training, resume, generation and chat commands. The training step count is the target total optimizer step, not an extra number of steps after resume.
+
+## 11. Repository map
+
+- QMINI_MASTER.py — single project entry point.
+- qmini/model.py — causal-convolution MoE model.
+- qmini/quantization.py — STE fake quantization and quaternary packing.
+- qmini/tokenizer.py, qmini/data.py — local tokenizer and corpus pipeline.
+- qmini/train.py — training, validation and resumable checkpoints.
+- qmini/generate.py — reference generation and terminal chat.
+- qmini/export.py — packed archive export and verification.
+- qmini/native_kernel.cpp, qmini/native.py — native projection primitive and build helper.
+- configs/ — base and smoke configurations.
+- tests/ — model, causality, quantization, data, training, export and native tests.
+- docs/ — architecture, training, evaluation and project scope.
+- colab/ — Colab training notebook.
+- .github/workflows/ — automated CI.
+
+## 12. Important limitations and data security
+
+- A random initialization is not a useful assistant. Real capability requires enough high-quality training data, compute and independent evaluation.
+- The current baseline is a compact research model, not a large foundation model or a claim of state-of-the-art performance.
+- FP32 master weights and optimizer states are used in training.
+- The packed archive is not yet a complete integer-only runtime.
+- The current native kernel is not integrated into the full model graph.
+- There are no bundled trained weights or private datasets.
+- The GitHub repository is public. Never commit credentials, private datasets, personal information or private checkpoints. Keep such artifacts in private storage.
+
+**Project principle:** build a truthful, testable, efficient text model first; add assistant capabilities only when the training data, implementation and evaluations support them.

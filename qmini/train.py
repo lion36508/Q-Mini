@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import random
 import shutil
+import warnings
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -17,62 +19,187 @@ from .config import QMiniConfig
 from .model import QMiniMoE
 
 
-def _load_tokens(path: str | Path) -> np.memmap:
+def _sha256_file(path: str | Path) -> dict[str, int | str]:
+    target = Path(path)
+    digest = hashlib.sha256()
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return {"sha256": digest.hexdigest(), "size_bytes": target.stat().st_size}
+
+
+def _load_tokens(path: str | Path, name: str) -> np.memmap:
     target = Path(path)
     if not target.is_file():
-        raise FileNotFoundError(f"Token stream not found: {target}")
-    if target.stat().st_size % 2:
-        raise ValueError(f"uint16 token file has invalid byte length: {target}")
+        raise FileNotFoundError(f"{name} token stream not found: {target}")
+    if target.stat().st_size % np.dtype(np.uint16).itemsize:
+        raise ValueError(f"{name} token stream is not aligned to uint16: {target}")
     values = np.memmap(target, mode="r", dtype=np.uint16)
     if values.size < 4:
-        raise ValueError(f"Token stream is too short: {target}")
+        raise ValueError(f"{name} token stream is too short: {target}")
     return values
 
 
-def _sample_batch(tokens, batch_size, seq_len, rng, device):
+def _validate_token_ids(tokens: np.memmap, vocab_size: int, name: str) -> None:
+    """Scan a memmap in bounded chunks; fail before training if IDs exceed vocab."""
+    chunk_size = 1 << 20
+    observed_max = 0
+    for start in range(0, len(tokens), chunk_size):
+        chunk = np.asarray(tokens[start:start + chunk_size])
+        if chunk.size:
+            observed_max = max(observed_max, int(chunk.max()))
+    if observed_max >= vocab_size:
+        raise ValueError(
+            f"{name} stream contains token ID {observed_max}, which is outside the configured vocabulary "
+            f"[0, {vocab_size - 1}]. "
+            "Rebuild token streams with the tokenizer paired to this model config."
+        )
+
+
+def _sample_batch(
+    tokens: np.memmap,
+    batch_size: int,
+    seq_len: int,
+    rng: np.random.Generator,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
     max_start = len(tokens) - seq_len - 1
-    if max_start <= 0:
-        raise ValueError(f"Need > {seq_len + 1} tokens, found {len(tokens)}.")
+    if max_start < 0:
+        raise ValueError(
+            f"Token stream needs at least {seq_len + 2} tokens; found {len(tokens)}."
+        )
     starts = rng.integers(0, max_start + 1, size=batch_size)
     samples = np.stack([
-        np.asarray(tokens[s:s + seq_len + 1], dtype=np.int64) for s in starts
+        np.asarray(tokens[start:start + seq_len + 1], dtype=np.int64)
+        for start in starts
     ])
-    return (
-        torch.as_tensor(samples[:, :-1], dtype=torch.long, device=device),
-        torch.as_tensor(samples[:, 1:], dtype=torch.long, device=device),
-    )
+    x = torch.as_tensor(samples[:, :-1], dtype=torch.long, device=device)
+    y = torch.as_tensor(samples[:, 1:], dtype=torch.long, device=device)
+    return x, y
 
 
-def _evaluate(model, tokens, batch_size, seq_len, batches, device, seed):
+def _evaluate(
+    model: QMiniMoE,
+    tokens: np.memmap,
+    batch_size: int,
+    seq_len: int,
+    batches: int,
+    device: torch.device,
+    seed: int,
+) -> dict[str, float]:
+    was_training = model.training
     model.eval()
     rng = np.random.default_rng(seed)
-    losses = []
-    with torch.inference_mode():
-        for _ in range(batches):
-            x, y = _sample_batch(tokens, batch_size, seq_len, rng, device)
-            result = model(x)
-            loss = F.cross_entropy(
-                result["logits"].float().reshape(-1, model.config.vocab_size),
-                y.reshape(-1),
-            )
-            losses.append(float(loss.item()))
-    mean_loss = float(np.mean(losses))
+    losses: list[float] = []
     try:
-        perplexity = math.exp(mean_loss)
-    except OverflowError:
-        perplexity = float("inf")
-    model.train()
+        with torch.inference_mode():
+            for _ in range(batches):
+                x, y = _sample_batch(tokens, batch_size, seq_len, rng, device)
+                result = model(x)
+                loss = F.cross_entropy(
+                    result["logits"].float().reshape(-1, model.config.vocab_size),
+                    y.reshape(-1),
+                )
+                if not torch.isfinite(loss):
+                    raise FloatingPointError("Validation loss became non-finite.")
+                losses.append(float(loss.item()))
+    finally:
+        model.train(was_training)
+
+    mean_loss = float(np.mean(losses))
+    # Keep JSONL metrics standards-compliant even for extreme validation loss.
+    perplexity = math.exp(mean_loss) if mean_loss < 709.0 else None
     return {"eval_loss": mean_loss, "eval_perplexity": perplexity}
 
 
-def _atomic_save(payload: dict[str, Any], path: Path) -> None:
+def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     try:
         torch.save(payload, temporary)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _atomic_json_save(payload: dict[str, Any], path: Path) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _resume_contract(
+    train_path: str | Path,
+    valid_path: str | Path,
+    tokenizer_path: str | Path | None,
+    batch_size: int,
+    seq_len: int,
+    grad_accum: int,
+    learning_rate: float,
+    weight_decay: float,
+    seed: int,
+) -> dict[str, Any]:
+    train_file = Path(train_path).resolve()
+    valid_file = Path(valid_path).resolve()
+    train_fingerprint = _sha256_file(train_file)
+    valid_fingerprint = _sha256_file(valid_file)
+    if train_file == valid_file or train_fingerprint == valid_fingerprint:
+        raise ValueError("Training and validation streams must be different files with different content.")
+    tokenizer_fingerprint = (
+        _sha256_file(tokenizer_path) if tokenizer_path is not None and Path(tokenizer_path).is_file()
+        else None
+    )
+    return {
+        "train": train_fingerprint,
+        "validation": valid_fingerprint,
+        "tokenizer": tokenizer_fingerprint,
+        "batch_size": int(batch_size),
+        "sequence_length": int(seq_len),
+        "gradient_accumulation": int(grad_accum),
+        "learning_rate": float(learning_rate),
+        "weight_decay": float(weight_decay),
+        "seed": int(seed),
+    }
+
+
+def _reconcile_metrics(path: Path, checkpoint_step: int) -> None:
+    """Discard log rows newer than the last durable checkpoint after an interrupted run."""
+    if not path.is_file():
+        return
+    kept: list[str] = []
+    changed = False
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+                step = int(record["step"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                changed = True
+                continue
+            if step <= checkpoint_step:
+                kept.append(json.dumps(record, allow_nan=False))
+            else:
+                changed = True
+    if changed:
+        temporary = path.with_name(path.name + ".tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                for line in kept:
+                    handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def train_model(
@@ -92,28 +219,61 @@ def train_model(
     resume: bool = False,
     tokenizer_path: str | Path | None = None,
     seed: int | None = None,
+    extend_schedule: bool = False,
+    allow_legacy_resume: bool = False,
 ) -> Path:
+    """Train from scratch or resume only when data and optimization settings match."""
     config.validate()
-    if min(steps, batch_size, grad_accum, eval_every, save_every, eval_batches) < 1:
-        raise ValueError("Step, batch and interval values must be positive.")
+    positive = {
+        "steps": steps,
+        "batch_size": batch_size,
+        "seq_len": seq_len,
+        "grad_accum": grad_accum,
+        "eval_every": eval_every,
+        "save_every": save_every,
+        "eval_batches": eval_batches,
+    }
+    invalid = [name for name, value in positive.items() if value < 1]
+    if invalid:
+        raise ValueError("These training settings must be positive: " + ", ".join(invalid))
     if not 2 <= seq_len <= config.max_context:
-        raise ValueError("seq_len must be 2..max_context.")
-    if learning_rate <= 0 or weight_decay < 0:
-        raise ValueError("Invalid learning rate or weight decay.")
+        raise ValueError(f"seq_len must be between 2 and {config.max_context}.")
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("learning_rate must be finite and positive.")
+    if not math.isfinite(weight_decay) or weight_decay < 0:
+        raise ValueError("weight_decay must be finite and non-negative.")
 
-    train_tokens = _load_tokens(train_bin)
-    valid_tokens = _load_tokens(valid_bin)
+    train_tokens = _load_tokens(train_bin, "Training")
+    valid_tokens = _load_tokens(valid_bin, "Validation")
+    _validate_token_ids(train_tokens, config.vocab_size, "Training")
+    _validate_token_ids(valid_tokens, config.vocab_size, "Validation")
+    # Fail early before model allocation when a batch cannot be sampled.
+    if len(train_tokens) < seq_len + 2 or len(valid_tokens) < seq_len + 2:
+        raise ValueError(
+            f"Both streams need at least {seq_len + 2} tokens for sequence length {seq_len}."
+        )
+
+    actual_seed = config.seed if seed is None else int(seed)
+    contract = _resume_contract(
+        train_bin, valid_bin, tokenizer_path, batch_size, seq_len,
+        grad_accum, learning_rate, weight_decay, actual_seed,
+    )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     run_dir = Path(output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint = run_dir / "latest.pt"
-    metrics = run_dir / "metrics.jsonl"
-    if checkpoint.exists() and not resume:
+    checkpoint_path = run_dir / "latest.pt"
+    metrics_path = run_dir / "metrics.jsonl"
+    run_manifest_path = run_dir / "run.json"
+    if checkpoint_path.exists() and not resume:
         raise FileExistsError(
-            f"Checkpoint exists: {checkpoint}; pass --resume or choose a new run directory."
+            f"Checkpoint exists: {checkpoint_path}; pass --resume or choose a new run directory."
+        )
+    if metrics_path.exists() and not resume and not checkpoint_path.exists():
+        raise FileExistsError(
+            f"Metrics log already exists: {metrics_path}; refusing to mix unrelated training runs."
         )
 
-    actual_seed = config.seed if seed is None else seed
     random.seed(actual_seed)
     rng = np.random.default_rng(actual_seed)
     torch.manual_seed(actual_seed)
@@ -122,34 +282,67 @@ def train_model(
 
     model = QMiniMoE(config).to(device)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=learning_rate, betas=(0.9, 0.95), weight_decay=weight_decay
+        model.parameters(),
+        lr=learning_rate,
+        betas=(0.9, 0.95),
+        weight_decay=weight_decay,
     )
-    amp = device.type == "cuda"
-    bf16 = bool(amp and torch.cuda.is_bf16_supported())
-    fp16 = bool(amp and not bf16)
-    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
-        scaler = torch.amp.GradScaler("cuda", enabled=fp16)
-    else:
-        scaler = torch.cuda.amp.GradScaler(enabled=fp16)
+    use_amp = device.type == "cuda"
+    bf16_supported = (
+        bool(torch.cuda.is_bf16_supported())
+        if use_amp and hasattr(torch.cuda, "is_bf16_supported")
+        else False
+    )
+    use_bf16 = bool(use_amp and bf16_supported)
+    use_fp16 = bool(use_amp and not use_bf16)
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=use_fp16)
+    except (AttributeError, TypeError):
+        scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
     start_step = 0
     tokens_seen = 0
+    schedule_total_steps = steps
     if resume:
-        if not checkpoint.is_file():
-            raise FileNotFoundError(f"No checkpoint to resume: {checkpoint}")
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"No checkpoint to resume: {checkpoint_path}")
         try:
-            state = torch.load(checkpoint, map_location=device, weights_only=False)
+            state = torch.load(
+                checkpoint_path, map_location=device, weights_only=False
+            )
         except TypeError:
-            state = torch.load(checkpoint, map_location=device)
+            state = torch.load(checkpoint_path, map_location=device)
+
+        if state.get("format") not in {"qmini-checkpoint-v1", "qmini-checkpoint-v2"}:
+            raise ValueError("Unsupported or unrecognized Q-Mini checkpoint format.")
         saved_config = QMiniConfig.from_dict(state["config"])
         if saved_config.to_dict() != config.to_dict():
-            raise ValueError("Checkpoint config mismatch; refusing unsafe resume.")
-        model.load_state_dict(state["model"])
+            raise ValueError("Checkpoint model config differs; refusing an unsafe resume.")
+
+        saved_contract = state.get("resume_contract")
+        if saved_contract is None:
+            if not allow_legacy_resume:
+                raise ValueError(
+                    "This checkpoint has no dataset/training fingerprint. "
+                    "Use --allow-legacy-resume only after personally verifying its source data."
+                )
+            warnings.warn(
+                "Legacy checkpoint accepted without dataset and optimizer-contract verification.",
+                RuntimeWarning,
+            )
+        elif saved_contract != contract:
+            raise ValueError(
+                "Resume contract mismatch (dataset/tokenizer fingerprint or optimizer settings). "
+                "Use a new run directory for changed data or settings."
+            )
+
+        model.load_state_dict(state["model"], strict=True)
         optimizer.load_state_dict(state["optimizer"])
         start_step = int(state["step"])
         tokens_seen = int(state.get(
             "tokens_seen", start_step * batch_size * grad_accum * seq_len
         ))
+        schedule_total_steps = int(state.get("schedule_total_steps", steps))
         if "numpy_rng" in state:
             rng.bit_generator.state = state["numpy_rng"]
         if "python_rng" in state:
@@ -162,140 +355,196 @@ def train_model(
                 torch.cuda.set_rng_state_all([item.cpu() for item in saved_cuda_rng])
         if "scaler" in state:
             scaler.load_state_dict(state["scaler"])
+
         if start_step >= steps:
             raise ValueError(
-                f"Checkpoint is already at step {start_step}; target steps must be greater."
+                f"Checkpoint is already at step {start_step}; --steps must be a larger total target."
             )
-        print(f"Resuming from optimizer step {start_step:,}.")
+        if steps > schedule_total_steps:
+            if not extend_schedule:
+                raise ValueError(
+                    f"Checkpoint scheduler horizon is {schedule_total_steps} steps. "
+                    "Pass --extend-schedule to deliberately extend the learning-rate schedule."
+                )
+            schedule_total_steps = steps
+        print(
+            f"Resuming from step {start_step:,}; schedule horizon={schedule_total_steps:,}."
+        )
 
+    run_manifest = {
+        "format": "qmini-run-manifest-v1",
+        "model_config": config.to_dict(),
+        "resume_contract": contract,
+        "schedule_total_steps": schedule_total_steps,
+        "precision": "bf16" if use_bf16 else "fp16" if use_fp16 else "fp32",
+        "device": str(device),
+    }
+    _atomic_json_save(run_manifest, run_manifest_path)
+    if resume:
+        _reconcile_metrics(metrics_path, start_step)
+
+    if use_amp:
+        torch.cuda.reset_peak_memory_stats()
     print(
-        f"Device={device}; AMP={'BF16' if bf16 else 'FP16' if fp16 else 'off'}; "
+        f"Device={device}; AMP={'BF16' if use_bf16 else 'FP16' if use_fp16 else 'off'}; "
         f"parameters={model.parameter_report()['total']:,}; "
-        f"global_batch={batch_size * grad_accum}"
+        f"global_batch={batch_size * grad_accum}; "
+        f"tokens/optimizer_step={batch_size * grad_accum * seq_len:,}"
     )
 
-    def lr_at(step: int) -> float:
-        warmup = max(1, int(steps * 0.03))
+    def learning_rate_at(step: int) -> float:
+        warmup = max(1, int(schedule_total_steps * 0.03))
         if step < warmup:
             return learning_rate * (step + 1) / warmup
-        progress = min(1.0, max(0.0, (step - warmup) / max(1, steps - warmup)))
+        progress = min(
+            1.0,
+            max(0.0, (step - warmup) / max(1, schedule_total_steps - warmup)),
+        )
         return learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     model.train()
     for step in range(start_step, steps):
         optimizer.zero_grad(set_to_none=True)
         accum = {"loss": 0.0, "ce": 0.0, "aux": 0.0}
-        sampled_steps = random.randint(1, config.max_thinking_steps)
+        sampled_thinking_steps = random.randint(1, config.max_thinking_steps)
         router_counts_total: list[torch.Tensor] | None = None
 
-        for _ in range(grad_accum):
+        for _micro_step in range(grad_accum):
             x, y = _sample_batch(train_tokens, batch_size, seq_len, rng, device)
-            dtype = torch.bfloat16 if bf16 else torch.float16
+            amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
             amp_context = (
-                torch.autocast(device_type="cuda", dtype=dtype) if amp else nullcontext()
+                torch.autocast(device_type="cuda", dtype=amp_dtype)
+                if use_amp else nullcontext()
             )
             with amp_context:
-                result = model(x, thinking_steps=sampled_steps)
-                ce = F.cross_entropy(
+                result = model(x, thinking_steps=sampled_thinking_steps)
+                cross_entropy = F.cross_entropy(
                     result["logits"].float().reshape(-1, config.vocab_size),
                     y.reshape(-1),
                 )
-                aux = result["aux_loss"].float()
-                loss = ce + config.router_aux_loss_coef * aux
+                auxiliary = result["aux_loss"].float()
+                loss = cross_entropy + config.router_aux_loss_coef * auxiliary
 
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"Non-finite loss at optimizer step {step + 1}; checkpoint is unchanged."
+                )
             scaled_loss = loss / grad_accum
-            if fp16:
+            if use_fp16:
                 scaler.scale(scaled_loss).backward()
             else:
                 scaled_loss.backward()
 
             accum["loss"] += float(loss.detach()) / grad_accum
-            accum["ce"] += float(ce.detach()) / grad_accum
-            accum["aux"] += float(aux.detach()) / grad_accum
-
-            current_counts = [
+            accum["ce"] += float(cross_entropy.detach()) / grad_accum
+            accum["aux"] += float(auxiliary.detach()) / grad_accum
+            batch_counts = [
                 item.detach().to(device="cpu", dtype=torch.int64)
                 for item in result["router_counts"]
             ]
             if router_counts_total is None:
-                router_counts_total = current_counts
+                router_counts_total = batch_counts
             else:
-                for index, counts in enumerate(current_counts):
-                    router_counts_total[index] += counts
+                for index, count in enumerate(batch_counts):
+                    router_counts_total[index] += count
 
-        if fp16:
+        if use_fp16:
             scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        lr = lr_at(step)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), 1.0, error_if_nonfinite=True
+        )
+        lr = learning_rate_at(step)
         for group in optimizer.param_groups:
             group["lr"] = lr
-        if fp16:
+        if use_fp16:
             scaler.step(optimizer)
             scaler.update()
         else:
             optimizer.step()
 
-        complete = step + 1
+        completed = step + 1
         tokens_seen += batch_size * grad_accum * seq_len
         record: dict[str, Any] = {
-            "step": complete,
+            "step": completed,
             "tokens_seen": tokens_seen,
             "train_loss": accum["loss"],
-            "train_ce": accum["ce"],
+            "train_cross_entropy": accum["ce"],
             "router_aux_loss": accum["aux"],
+            "gradient_norm": float(grad_norm.detach()),
             "learning_rate": lr,
-            "thinking_steps": sampled_steps,
+            "thinking_steps": sampled_thinking_steps,
             "router_token_counts": (
                 [counts.tolist() for counts in router_counts_total]
                 if router_counts_total is not None else []
             ),
         }
-        if complete % eval_every == 0 or complete == steps:
+
+        if completed % eval_every == 0 or completed == steps:
             record.update(_evaluate(
-                model, valid_tokens, batch_size, seq_len, eval_batches, device,
-                actual_seed + complete,
+                model, valid_tokens, batch_size, seq_len, eval_batches,
+                device, actual_seed + completed,
             ))
-        if complete % save_every == 0 or complete == steps:
-            _atomic_save({
-                "format": "qmini-checkpoint-v1",
-                "step": complete,
+        if use_amp:
+            record["peak_cuda_memory_bytes"] = int(torch.cuda.max_memory_allocated())
+
+        if completed % save_every == 0 or completed == steps:
+            checkpoint_payload = {
+                "format": "qmini-checkpoint-v2",
+                "step": completed,
                 "tokens_seen": tokens_seen,
+                "schedule_total_steps": schedule_total_steps,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "config": config.to_dict(),
+                "resume_contract": contract,
                 "numpy_rng": rng.bit_generator.state,
                 "python_rng": random.getstate(),
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                 "scaler": scaler.state_dict(),
-            }, checkpoint)
+            }
+            _atomic_torch_save(checkpoint_payload, checkpoint_path)
 
-        with metrics.open("a", encoding="utf-8") as handle:
+        with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, allow_nan=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
-        if complete == 1 or complete % 10 == 0 or "eval_loss" in record:
+        if completed == 1 or completed % 10 == 0 or "eval_loss" in record:
             message = (
-                f"step {complete}/{steps} tokens={tokens_seen:,} "
+                f"step={completed:,}/{steps:,} tokens={tokens_seen:,} "
                 f"loss={accum['loss']:.4f} ce={accum['ce']:.4f} "
-                f"aux={accum['aux']:.4f} lr={lr:.2e}"
+                f"aux={accum['aux']:.4f} grad={float(grad_norm):.3f} lr={lr:.2e}"
             )
             if "eval_loss" in record:
                 message += (
-                    f" eval={record['eval_loss']:.4f}"
+                    f" val_loss={record['eval_loss']:.4f}"
                     f" ppl={record['eval_perplexity']:.2f}"
                 )
             print(message, flush=True)
 
     final_dir = run_dir / "final_model"
     final_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), final_dir / "model.pt")
+    _atomic_torch_save(model.state_dict(), final_dir / "model.pt")
     config.save(final_dir / "config.json")
-    if tokenizer_path and Path(tokenizer_path).is_file():
+    if tokenizer_path is not None and Path(tokenizer_path).is_file():
         shutil.copy2(tokenizer_path, final_dir / "tokenizer.json")
+
     from .export import export_packed_state
     packed_path = export_packed_state(
         model.state_dict(), config, final_dir / "model.qmini.npz"
     )
-    print(f"Packed inference export: {packed_path} ({packed_path.stat().st_size:,} bytes)")
-    print(f"Training complete: {final_dir}")
+    final_report = {
+        "format": "qmini-final-model-v1",
+        "step": steps,
+        "tokens_seen": tokens_seen,
+        "parameters": model.parameter_report()["total"],
+        "packed_export": packed_path.name,
+        "packed_export_bytes": packed_path.stat().st_size,
+        "config": config.to_dict(),
+    }
+    _atomic_json_save(final_report, final_dir / "model_manifest.json")
+    print(
+        f"Training complete: {final_dir} | packed export={packed_path.stat().st_size:,} bytes"
+    )
     return final_dir
