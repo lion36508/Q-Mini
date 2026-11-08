@@ -597,9 +597,14 @@ def train_model(
                 f"aux={accum['aux']:.4f} grad={float(grad_norm):.3f} lr={lr:.2e}"
             )
             if "eval_loss" in record:
+                perplexity_value = record["eval_perplexity"]
+                perplexity_text = (
+                    f"{perplexity_value:.2f}"
+                    if perplexity_value is not None else "overflow"
+                )
                 message += (
                     f" val_loss={record['eval_loss']:.4f}"
-                    f" ppl={record['eval_perplexity']:.2f}"
+                    f" ppl={perplexity_text}"
                 )
             print(message, flush=True)
 

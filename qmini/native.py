@@ -76,7 +76,7 @@ class NativeKernel:
 
 
 _NATIVE_KERNEL: NativeKernel | None = None
-_NATIVE_ATTEMPTED_PATH: Path | None = None
+_NATIVE_CACHE_KEY: tuple[str, int, int] | None = None
 
 
 def configured_library_path() -> Path:
@@ -87,21 +87,29 @@ def configured_library_path() -> Path:
 
 
 def get_native_kernel() -> NativeKernel | None:
-    """Load the optional native CPU projection once; absence means PyTorch fallback."""
-    global _NATIVE_KERNEL, _NATIVE_ATTEMPTED_PATH
+    """Load/reload the optional native CPU projection when its artifact changes."""
+    global _NATIVE_KERNEL, _NATIVE_CACHE_KEY
     path = configured_library_path()
-    if _NATIVE_ATTEMPTED_PATH == path:
-        return _NATIVE_KERNEL
-    _NATIVE_ATTEMPTED_PATH = path
-    _NATIVE_KERNEL = None
     if not path.is_file():
+        _NATIVE_KERNEL = None
+        _NATIVE_CACHE_KEY = (str(path), -1, -1)
         return None
+
+    stat = path.stat()
+    cache_key = (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+    if _NATIVE_CACHE_KEY == cache_key:
+        return _NATIVE_KERNEL
+
     try:
-        _NATIVE_KERNEL = NativeKernel(path)
+        loaded = NativeKernel(path)
     except OSError as exc:
+        _NATIVE_KERNEL = None
+        _NATIVE_CACHE_KEY = None
         raise RuntimeError(
             f"Q-Mini native library exists but cannot be loaded: {path}: {exc}"
         ) from exc
+    _NATIVE_KERNEL = loaded
+    _NATIVE_CACHE_KEY = cache_key
     return _NATIVE_KERNEL
 
 

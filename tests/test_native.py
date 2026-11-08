@@ -162,3 +162,27 @@ def test_pytorch_fallback_is_used_without_native_library(monkeypatch):
         )
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
     assert not hasattr(layer, "_qmini_native_packed_weight")
+
+
+def test_native_loader_retries_after_library_is_built(
+    tmp_path, monkeypatch
+):
+    import qmini.native as native_module
+
+    compiler = shutil.which("clang++") or shutil.which("g++")
+    if not compiler:
+        pytest.skip("C++ compiler missing")
+    source = Path(__file__).resolve().parents[1] / "qmini" / "native_kernel.cpp"
+    library = tmp_path / "late-built.so"
+
+    monkeypatch.setenv("QMINI_NATIVE_LIBRARY", str(library))
+    monkeypatch.setattr(native_module, "_NATIVE_KERNEL", None)
+    monkeypatch.setattr(native_module, "_NATIVE_CACHE_KEY", None)
+    assert native_module.get_native_kernel() is None
+
+    subprocess.run(
+        [compiler, "-O2", "-std=c++17", "-shared", "-fPIC", str(source), "-o", str(library)],
+        check=True,
+    )
+    assert native_module.get_native_kernel() is not None
+    assert native_module.native_kernel_status()["available"] is True
