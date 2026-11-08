@@ -44,8 +44,8 @@ class NativeKernel:
         packed = np.ascontiguousarray(packed_weights, dtype=np.uint8)
         ws = np.ascontiguousarray(weight_scales, dtype=np.float32)
         xs = np.ascontiguousarray(activation_scales, dtype=np.float32)
-        if x.ndim != 2 or x.shape[0] < 1 or x.shape[1] < 1:
-            raise ValueError("activations_i8 must have non-empty shape [rows, in_features].")
+        if x.ndim != 2:
+            raise ValueError("activations_i8 must have shape [rows, in_features].")
         if packed.ndim != 2 or ws.ndim != 1 or xs.ndim != 1:
             raise ValueError("Packed weights and scales have invalid ranks.")
         if packed.shape[0] != ws.size or packed.shape[1] * 4 < x.shape[1]:

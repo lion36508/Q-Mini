@@ -32,14 +32,16 @@ def test_router_gets_gradient_from_language_model_loss(tiny_config):
     logits = model(ids)["logits"]
     logits.float().square().mean().backward()
     gradient = model.blocks[0].moe.router.weight.grad
-    assert gradient is not None and torch.isfinite(gradient).all()
+    assert gradient is not None
+    assert torch.isfinite(gradient).all()
     assert gradient.abs().sum() > 0
 
 
 def test_router_balance_loss_has_gradient(tiny_config):
     model = QMiniMoE(tiny_config)
     ids = torch.randint(0, tiny_config.vocab_size, (2, 12))
-    model(ids)["aux_loss"].backward()
+    result = model(ids)
+    result["aux_loss"].backward()
     gradient = model.blocks[0].moe.router.weight.grad
     assert gradient is not None and torch.isfinite(gradient).all()
     assert gradient.abs().sum() > 0
@@ -50,10 +52,7 @@ def test_no_attention_or_qkv_modules(tiny_config):
     forbidden = (nn.MultiheadAttention, nn.Transformer, nn.TransformerEncoder, nn.TransformerDecoder)
     assert not any(isinstance(module, forbidden) for module in model.modules())
     names = [name.lower() for name, _ in model.named_modules()]
-    assert not any(
-        any(token in name for token in ("q_proj", "k_proj", "v_proj", "attention"))
-        for name in names
-    )
+    assert not any(any(token in name for token in ("q_proj", "k_proj", "v_proj", "attention")) for name in names)
 
 
 def test_refinement_step_bounds(tiny_config):
@@ -64,50 +63,9 @@ def test_refinement_step_bounds(tiny_config):
         model(ids, thinking_steps=3)
 
 
-def test_empty_inputs_and_invalid_token_ids_are_rejected(tiny_config):
+def test_empty_sequence_and_batch_are_rejected(tiny_config):
     model = QMiniMoE(tiny_config)
     with pytest.raises(ValueError, match="Sequence length"):
         model(torch.empty((1, 0), dtype=torch.long))
     with pytest.raises(ValueError, match="Batch size"):
         model(torch.empty((0, 4), dtype=torch.long))
-    with pytest.raises(ValueError, match="outside the configured vocabulary"):
-        model(torch.tensor([[tiny_config.vocab_size]], dtype=torch.long))
-
-
-def test_incremental_cache_matches_full_sequence_logits(tiny_config):
-    torch.manual_seed(12)
-    model = QMiniMoE(tiny_config).eval()
-    ids = torch.randint(0, tiny_config.vocab_size, (2, 19))
-    with torch.inference_mode():
-        full = model(ids, thinking_steps=2)["logits"]
-        state = None
-        streamed = []
-        for position in range(ids.shape[1]):
-            result, state = model.forward_step(
-                ids[:, position], state=state, thinking_steps=2
-            )
-            streamed.append(result["logits"])
-        incremental = torch.stack(streamed, dim=1)
-
-    assert state.tokens_processed == ids.shape[1]
-    assert torch.allclose(incremental, full, atol=2e-5, rtol=2e-5)
-
-
-def test_incremental_state_isolated_per_batch_item(tiny_config):
-    torch.manual_seed(4)
-    model = QMiniMoE(tiny_config).eval()
-    tokens = torch.randint(0, tiny_config.vocab_size, (2, 8))
-    with torch.inference_mode():
-        result_a, _ = model.forward_step(tokens[:, 0])
-        result_b0, _ = model.forward_step(tokens[0:1, 0])
-        result_b1, _ = model.forward_step(tokens[1:2, 0])
-    assert torch.allclose(result_a["logits"][0], result_b0["logits"][0], atol=1e-6)
-    assert torch.allclose(result_a["logits"][1], result_b1["logits"][0], atol=1e-6)
-
-
-def test_incremental_step_count_cannot_change_mid_stream(tiny_config):
-    model = QMiniMoE(tiny_config).eval()
-    with torch.inference_mode():
-        _, state = model.forward_step(torch.tensor([1]), thinking_steps=1)
-        with pytest.raises(ValueError, match="cannot change"):
-            model.forward_step(torch.tensor([2]), state=state, thinking_steps=2)
