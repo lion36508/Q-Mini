@@ -32,6 +32,8 @@ def test_local_byte_bpe_round_trip_and_no_overwrite(tmp_path):
     assert encoded.ids
     assert loaded.decode(encoded.ids) == text
     assert trained.get_vocab_size() <= 300
+    for token in ("<|system|>", "<|user|>", "<|assistant|>", "<|tool|>", "<|other|>", "<|end|>"):
+        assert loaded.token_to_id(token) is not None
 
     with pytest.raises(FileExistsError):
         train_tokenizer([corpus], output, vocab_size=300, min_frequency=1)

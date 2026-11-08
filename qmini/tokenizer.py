@@ -8,7 +8,10 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from .data import expand_data_paths, iter_training_text_records
 
-SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
+SPECIAL_TOKENS = [
+    "<pad>", "<bos>", "<eos>", "<unk>",
+    "<|system|>", "<|user|>", "<|assistant|>", "<|tool|>", "<|other|>", "<|end|>",
+]
 
 
 def train_tokenizer(
@@ -25,8 +28,12 @@ def train_tokenizer(
         raise FileExistsError(
             f"Tokenizer already exists: {target}; pass overwrite=True to replace it."
         )
-    if vocab_size < 260:
-        raise ValueError("Byte-level BPE vocab_size must be at least 260.")
+    minimum_vocab = 256 + len(SPECIAL_TOKENS)
+    if vocab_size < minimum_vocab:
+        raise ValueError(
+            f"Byte-level BPE vocab_size must be at least {minimum_vocab} "
+            "to reserve the complete byte alphabet and Q-Mini control tokens."
+        )
     if min_frequency < 1:
         raise ValueError("min_frequency must be a positive integer.")
     if not 0.0 <= validation_fraction < 0.5:

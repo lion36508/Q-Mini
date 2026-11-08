@@ -260,8 +260,19 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
                     continue
                 is_assistant = role in ASSISTANT_ROLES
                 has_assistant = has_assistant or is_assistant
-                segments.append((f"[{role.upper()}]\n", is_assistant))
+                if role in ASSISTANT_ROLES:
+                    control_role = "assistant"
+                elif role in {"user"}:
+                    control_role = "user"
+                elif role in {"system", "developer"}:
+                    control_role = "system"
+                elif role in {"tool", "function"}:
+                    control_role = "tool"
+                else:
+                    control_role = "other"
+                segments.append((f"<|{control_role}|>", is_assistant))
                 segments.append((body + "\n", is_assistant))
+                segments.append(("<|end|>\n", is_assistant))
             if segments:
                 return segments, True, has_assistant
 
@@ -279,10 +290,12 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
         )
         if user_text and assistant_text:
             return [
-                ("[USER]\n", False),
+                ("<|user|>", False),
                 (user_text + "\n", False),
-                ("[ASSISTANT]\n", True),
+                ("<|end|>\n", False),
+                ("<|assistant|>", True),
                 (assistant_text + "\n", True),
+                ("<|end|>\n", True),
             ], True, True
 
     text = extract_text(record).strip()
