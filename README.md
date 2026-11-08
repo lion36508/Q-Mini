@@ -125,9 +125,9 @@ Keep validation documents separate from training documents. Do not treat unverif
 ### Training pipeline
 
 - Discover supported local data files: TXT, Markdown, JSON, JSONL/NDJSON, CSV and optional Parquet.
-- Train a local byte-level BPE tokenizer from the selected corpus.
-- Convert documents into role-marked text where appropriate.
-- Split at document level, de-duplicate exact documents using a disk-backed index, and create uint16 token streams with aligned uint8 loss masks.
+- Split documents deterministically and de-duplicate exact documents using disk-backed indexes.
+- Train the local byte-level BPE tokenizer on training documents only; validation documents are excluded from tokenizer vocabulary learning.
+- Convert documents into role-marked text where appropriate and create uint16 token streams with aligned uint8 loss masks.
 - In `auto` mode, plain text receives ordinary next-token loss while structured chat/Q&A applies supervised loss to assistant response spans and leaves user/system text as context.
 - Run a tiny smoke training before the full run.
 - Train next-token prediction with cross-entropy and router load-balancing loss.

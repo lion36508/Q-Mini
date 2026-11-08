@@ -163,6 +163,8 @@ def iter_training_text_records(
         connection = sqlite3.connect(database_path)
         yielded = 0
         try:
+            connection.execute("PRAGMA journal_mode=OFF")
+            connection.execute("PRAGMA synchronous=OFF")
             connection.execute("CREATE TABLE seen (digest BLOB PRIMARY KEY)")
             for document in iter_text_records(source_paths):
                 normalized = document.strip()
@@ -179,6 +181,8 @@ def iter_training_text_records(
                 )
                 if inserted.rowcount == 1:
                     yielded += 1
+                    if yielded % 10000 == 0:
+                        connection.commit()
                     yield normalized
             if yielded == 0:
                 raise ValueError(

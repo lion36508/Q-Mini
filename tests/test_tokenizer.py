@@ -70,7 +70,7 @@ def test_tokenizer_refuses_empty_training_partition(tmp_path):
         for index in range(100)
         if _is_validation(
             f"held out only document {index} must not be used for tokenizer training",
-            0.999,
+            0.49,
         )
     )
     corpus = tmp_path / "validation.txt"
@@ -78,5 +78,5 @@ def test_tokenizer_refuses_empty_training_partition(tmp_path):
     with pytest.raises(ValueError, match="No unique training documents"):
         train_tokenizer(
             [corpus], tmp_path / "tokenizer.json",
-            vocab_size=300, min_frequency=1, validation_fraction=0.999,
+            vocab_size=300, min_frequency=1, validation_fraction=0.49,
         )
