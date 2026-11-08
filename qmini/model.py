@@ -8,7 +8,71 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import QMiniConfig
-from .quantization import fake_quantize_int8, quantize_quaternary
+from .quantization import (
+    fake_quantize_int8,
+    pack_quaternary,
+    quantize_int8_per_token,
+    quantize_quaternary,
+)
+
+
+def _cache_key(weight: torch.Tensor) -> tuple[int, int, tuple[int, ...]]:
+    return (int(weight._version), int(weight.data_ptr()), tuple(weight.shape))
+
+
+def _cached_quantized_weight(module: nn.Module, weight: torch.Tensor) -> torch.Tensor:
+    """Cache only immutable eval/no-grad weights; training always uses fresh STE ops."""
+    if module.training or torch.is_grad_enabled():
+        return quantize_quaternary(weight)
+    key = _cache_key(weight)
+    if getattr(module, "_qmini_quantized_key", None) != key:
+        module._qmini_quantized_weight = quantize_quaternary(weight)
+        module._qmini_quantized_key = key
+    return module._qmini_quantized_weight
+
+
+def _try_native_linear(
+    module: nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Run the real packed INT8 C++ projection for CPU inference when installed."""
+    if (
+        module.training
+        or torch.is_grad_enabled()
+        or x.device.type != "cpu"
+        or x.dtype != torch.float32
+        or weight.device.type != "cpu"
+        or weight.dtype != torch.float32
+        or weight.ndim != 2
+        or x.shape[-1] != weight.shape[1]
+    ):
+        return None
+
+    from .native import get_native_kernel
+
+    kernel = get_native_kernel()
+    if kernel is None:
+        return None
+
+    key = _cache_key(weight)
+    if getattr(module, "_qmini_native_packed_key", None) != key:
+        packed, scales = pack_quaternary(weight)
+        module._qmini_native_packed_weight = packed
+        module._qmini_native_weight_scales = scales
+        module._qmini_native_packed_key = key
+
+    activations_i8, activation_scales = quantize_int8_per_token(x)
+    output = kernel.linear(
+        activations_i8.cpu().numpy(),
+        module._qmini_native_packed_weight,
+        module._qmini_native_weight_scales,
+        activation_scales.cpu().numpy(),
+        bias.detach().float().cpu().numpy() if bias is not None else None,
+    )
+    tensor = torch.from_numpy(output)
+    return tensor.reshape(*x.shape[:-1], weight.shape[0])
 
 
 class RMSNorm(nn.Module):
@@ -28,7 +92,10 @@ class QLinear(nn.Linear):
     """Quaternary weight-aware projection with per-token INT8 fake quantization."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(fake_quantize_int8(x), quantize_quaternary(self.weight), self.bias)
+        native_output = _try_native_linear(self, x, self.weight, self.bias)
+        if native_output is not None:
+            return native_output
+        return F.linear(fake_quantize_int8(x), _cached_quantized_weight(self, self.weight), self.bias)
 
 
 class QEmbedding(nn.Module):
@@ -40,12 +107,15 @@ class QEmbedding(nn.Module):
         nn.init.normal_(self.weight, mean=0.0, std=0.02)
 
     def quantized_weight(self) -> torch.Tensor:
-        return quantize_quaternary(self.weight)
+        return _cached_quantized_weight(self, self.weight)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return fake_quantize_int8(F.embedding(token_ids, self.quantized_weight()))
 
     def project(self, hidden: torch.Tensor) -> torch.Tensor:
+        native_output = _try_native_linear(self, hidden, self.weight, None)
+        if native_output is not None:
+            return native_output
         return F.linear(fake_quantize_int8(hidden), self.quantized_weight())
 
 
@@ -67,9 +137,10 @@ class CausalGatedDepthwiseConv(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def _kernel(self) -> torch.Tensor:
-        return quantize_quaternary(
-            self.depthwise_weight.reshape(self.dim, self.kernel_size)
-        ).reshape_as(self.depthwise_weight)
+        quantized = _cached_quantized_weight(
+            self, self.depthwise_weight.reshape(self.dim, self.kernel_size)
+        )
+        return quantized.reshape_as(self.depthwise_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3 or x.shape[-1] != self.dim:
