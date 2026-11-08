@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 import os
 import re
 import sqlite3
@@ -40,8 +41,17 @@ class LocalMemoryStore:
         connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
+    @contextmanager
+    def _connection(self):
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_records (
@@ -142,7 +152,7 @@ class LocalMemoryStore:
         tags_json = json.dumps(normalized_tags, ensure_ascii=False)
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 "SELECT id, tags_json FROM memory_records WHERE content_sha256=?",
                 (digest,),
@@ -209,7 +219,7 @@ class LocalMemoryStore:
             raise ValueError(f"limit must be between 1 and {self.MAX_RESULTS}.")
         normalized = query.strip()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             if not normalized:
                 rows = connection.execute(
                     "SELECT * FROM memory_records ORDER BY updated_at DESC, id DESC LIMIT ?",
@@ -257,7 +267,7 @@ class LocalMemoryStore:
     def get(self, memory_id: int) -> dict[str, Any] | None:
         if not isinstance(memory_id, int) or memory_id < 1:
             raise ValueError("memory_id must be a positive integer.")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM memory_records WHERE id=?", (memory_id,)
             ).fetchone()
@@ -266,7 +276,7 @@ class LocalMemoryStore:
     def forget(self, memory_id: int) -> bool:
         if not isinstance(memory_id, int) or memory_id < 1:
             raise ValueError("memory_id must be a positive integer.")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT id FROM memory_records WHERE id=?", (memory_id,)
             ).fetchone()
@@ -280,7 +290,7 @@ class LocalMemoryStore:
         return True
 
     def count(self) -> int:
-        with self._connect() as connection:
+        with self._connection() as connection:
             return int(connection.execute(
                 "SELECT COUNT(*) FROM memory_records"
             ).fetchone()[0])
@@ -288,7 +298,7 @@ class LocalMemoryStore:
     def export_json(self, output_path: str | Path) -> Path:
         target = Path(output_path).expanduser()
         target.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM memory_records ORDER BY id"
             ).fetchall()
