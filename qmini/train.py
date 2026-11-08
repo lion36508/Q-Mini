@@ -56,37 +56,100 @@ def _validate_token_ids(tokens: np.memmap, vocab_size: int, name: str) -> None:
         )
 
 
+def _load_masks(path: str | Path | None, tokens: np.memmap, name: str) -> np.memmap | None:
+    if path is None:
+        return None
+    target = Path(path)
+    if not target.is_file():
+        raise FileNotFoundError(f"{name} loss-mask file not found: {target}")
+    if target.stat().st_size != len(tokens):
+        raise ValueError(
+            f"{name} loss mask has {target.stat().st_size} bytes, but token stream has {len(tokens)} tokens."
+        )
+    masks = np.memmap(target, mode="r", dtype=np.uint8)
+    chunk_size = 1 << 20
+    target_count = 0
+    for start in range(0, len(masks), chunk_size):
+        chunk = np.asarray(masks[start:start + chunk_size])
+        if not np.isin(chunk, (0, 1)).all():
+            raise ValueError(f"{name} loss mask must contain only 0 and 1.")
+        target_count += int(chunk.sum())
+    if target_count == 0:
+        raise ValueError(f"{name} loss mask contains no supervised target tokens.")
+    return masks
+
+
 def _sample_batch(
     tokens: np.memmap,
+    masks: np.memmap | None,
     batch_size: int,
     seq_len: int,
     rng: np.random.Generator,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     max_start = len(tokens) - seq_len - 1
     if max_start < 0:
         raise ValueError(
             f"Token stream needs at least {seq_len + 2} tokens; found {len(tokens)}."
         )
-    starts = rng.integers(0, max_start + 1, size=batch_size)
-    samples = np.stack([
-        np.asarray(tokens[start:start + seq_len + 1], dtype=np.int64)
-        for start in starts
-    ])
-    x = torch.as_tensor(samples[:, :-1], dtype=torch.long, device=device)
-    y = torch.as_tensor(samples[:, 1:], dtype=torch.long, device=device)
-    return x, y
+
+    samples = []
+    target_masks = []
+    for _row in range(batch_size):
+        selected = None
+        for _attempt in range(128):
+            start = int(rng.integers(0, max_start + 1))
+            label_mask = (
+                np.ones(seq_len, dtype=np.uint8)
+                if masks is None
+                else np.asarray(masks[start + 1:start + seq_len + 1], dtype=np.uint8)
+            )
+            if int(label_mask.sum()) > 0:
+                selected = start, label_mask
+                break
+        if selected is None:
+            raise ValueError(
+                "Could not sample a sequence containing supervised targets. "
+                "Increase seq_len or provide denser assistant-response labels."
+            )
+        start, label_mask = selected
+        samples.append(np.asarray(tokens[start:start + seq_len + 1], dtype=np.int64))
+        target_masks.append(label_mask)
+
+    batch = np.stack(samples)
+    x = torch.as_tensor(batch[:, :-1], dtype=torch.long, device=device)
+    y = torch.as_tensor(batch[:, 1:], dtype=torch.long, device=device)
+    loss_mask = torch.as_tensor(np.stack(target_masks), dtype=torch.float32, device=device)
+    return x, y, loss_mask
+
+
+def _masked_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    target_mask: torch.Tensor,
+) -> torch.Tensor:
+    per_token = F.cross_entropy(
+        logits.float().reshape(-1, logits.shape[-1]),
+        targets.reshape(-1),
+        reduction="none",
+    ).reshape_as(targets)
+    weights = target_mask.to(dtype=per_token.dtype)
+    denominator = weights.sum()
+    if not bool(denominator > 0):
+        raise ValueError("A sampled batch contains no supervised target tokens.")
+    return (per_token * weights).sum() / denominator
 
 
 def _evaluate(
     model: QMiniMoE,
     tokens: np.memmap,
+    masks: np.memmap | None,
     batch_size: int,
     seq_len: int,
     batches: int,
     device: torch.device,
     seed: int,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     was_training = model.training
     model.eval()
     rng = np.random.default_rng(seed)
@@ -94,11 +157,12 @@ def _evaluate(
     try:
         with torch.inference_mode():
             for _ in range(batches):
-                x, y = _sample_batch(tokens, batch_size, seq_len, rng, device)
+                x, y, target_mask = _sample_batch(
+                    tokens, masks, batch_size, seq_len, rng, device
+                )
                 result = model(x)
-                loss = F.cross_entropy(
-                    result["logits"].float().reshape(-1, model.config.vocab_size),
-                    y.reshape(-1),
+                loss = _masked_cross_entropy(
+                    result["logits"], y, target_mask
                 )
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Validation loss became non-finite.")
@@ -107,7 +171,6 @@ def _evaluate(
         model.train(was_training)
 
     mean_loss = float(np.mean(losses))
-    # Keep JSONL metrics standards-compliant even for extreme validation loss.
     perplexity = math.exp(mean_loss) if mean_loss < 709.0 else None
     return {"eval_loss": mean_loss, "eval_perplexity": perplexity}
 
@@ -141,6 +204,8 @@ def _resume_contract(
     train_path: str | Path,
     valid_path: str | Path,
     tokenizer_path: str | Path | None,
+    train_mask_path: str | Path | None,
+    valid_mask_path: str | Path | None,
     batch_size: int,
     seq_len: int,
     grad_accum: int,
@@ -161,6 +226,8 @@ def _resume_contract(
     return {
         "train": train_fingerprint,
         "validation": valid_fingerprint,
+        "train_loss_mask": _sha256_file(train_mask_path) if train_mask_path else None,
+        "validation_loss_mask": _sha256_file(valid_mask_path) if valid_mask_path else None,
         "tokenizer": tokenizer_fingerprint,
         "batch_size": int(batch_size),
         "sequence_length": int(seq_len),
@@ -221,6 +288,8 @@ def train_model(
     seed: int | None = None,
     extend_schedule: bool = False,
     allow_legacy_resume: bool = False,
+    train_mask_bin: str | Path | None = None,
+    valid_mask_bin: str | Path | None = None,
 ) -> Path:
     """Train from scratch or resume only when data and optimization settings match."""
     config.validate()
@@ -243,8 +312,12 @@ def train_model(
     if not math.isfinite(weight_decay) or weight_decay < 0:
         raise ValueError("weight_decay must be finite and non-negative.")
 
+    if (train_mask_bin is None) != (valid_mask_bin is None):
+        raise ValueError("Provide both --train-mask-bin and --valid-mask-bin, or neither.")
     train_tokens = _load_tokens(train_bin, "Training")
     valid_tokens = _load_tokens(valid_bin, "Validation")
+    train_masks = _load_masks(train_mask_bin, train_tokens, "Training")
+    valid_masks = _load_masks(valid_mask_bin, valid_tokens, "Validation")
     _validate_token_ids(train_tokens, config.vocab_size, "Training")
     _validate_token_ids(valid_tokens, config.vocab_size, "Validation")
     # Fail early before model allocation when a batch cannot be sampled.
@@ -255,8 +328,8 @@ def train_model(
 
     actual_seed = config.seed if seed is None else int(seed)
     contract = _resume_contract(
-        train_bin, valid_bin, tokenizer_path, batch_size, seq_len,
-        grad_accum, learning_rate, weight_decay, actual_seed,
+        train_bin, valid_bin, tokenizer_path, train_mask_bin, valid_mask_bin,
+        batch_size, seq_len, grad_accum, learning_rate, weight_decay, actual_seed,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -302,6 +375,7 @@ def train_model(
 
     start_step = 0
     tokens_seen = 0
+    supervised_tokens_seen = 0
     schedule_total_steps = steps
     if resume:
         if not checkpoint_path.is_file():
@@ -342,6 +416,7 @@ def train_model(
         tokens_seen = int(state.get(
             "tokens_seen", start_step * batch_size * grad_accum * seq_len
         ))
+        supervised_tokens_seen = int(state.get("supervised_tokens_seen", tokens_seen))
         schedule_total_steps = int(state.get("schedule_total_steps", steps))
         if "numpy_rng" in state:
             rng.bit_generator.state = state["numpy_rng"]
@@ -405,12 +480,14 @@ def train_model(
     model.train()
     for step in range(start_step, steps):
         optimizer.zero_grad(set_to_none=True)
-        accum = {"loss": 0.0, "ce": 0.0, "aux": 0.0}
+        accum = {"loss": 0.0, "ce": 0.0, "aux": 0.0, "targets": 0.0}
         sampled_thinking_steps = random.randint(1, config.max_thinking_steps)
         router_counts_total: list[torch.Tensor] | None = None
 
         for _micro_step in range(grad_accum):
-            x, y = _sample_batch(train_tokens, batch_size, seq_len, rng, device)
+            x, y, target_mask = _sample_batch(
+                train_tokens, train_masks, batch_size, seq_len, rng, device
+            )
             amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
             amp_context = (
                 torch.autocast(device_type="cuda", dtype=amp_dtype)
@@ -418,9 +495,8 @@ def train_model(
             )
             with amp_context:
                 result = model(x, thinking_steps=sampled_thinking_steps)
-                cross_entropy = F.cross_entropy(
-                    result["logits"].float().reshape(-1, config.vocab_size),
-                    y.reshape(-1),
+                cross_entropy = _masked_cross_entropy(
+                    result["logits"], y, target_mask
                 )
                 auxiliary = result["aux_loss"].float()
                 loss = cross_entropy + config.router_aux_loss_coef * auxiliary
@@ -438,6 +514,7 @@ def train_model(
             accum["loss"] += float(loss.detach()) / grad_accum
             accum["ce"] += float(cross_entropy.detach()) / grad_accum
             accum["aux"] += float(auxiliary.detach()) / grad_accum
+            accum["targets"] += float(target_mask.sum().detach())
             batch_counts = [
                 item.detach().to(device="cpu", dtype=torch.int64)
                 for item in result["router_counts"]
@@ -464,9 +541,11 @@ def train_model(
 
         completed = step + 1
         tokens_seen += batch_size * grad_accum * seq_len
+        supervised_tokens_seen += int(accum["targets"])
         record: dict[str, Any] = {
             "step": completed,
             "tokens_seen": tokens_seen,
+            "supervised_tokens_seen": supervised_tokens_seen,
             "train_loss": accum["loss"],
             "train_cross_entropy": accum["ce"],
             "router_aux_loss": accum["aux"],
@@ -481,7 +560,7 @@ def train_model(
 
         if completed % eval_every == 0 or completed == steps:
             record.update(_evaluate(
-                model, valid_tokens, batch_size, seq_len, eval_batches,
+                model, valid_tokens, valid_masks, batch_size, seq_len, eval_batches,
                 device, actual_seed + completed,
             ))
         if use_amp:
@@ -492,6 +571,7 @@ def train_model(
                 "format": "qmini-checkpoint-v2",
                 "step": completed,
                 "tokens_seen": tokens_seen,
+                "supervised_tokens_seen": supervised_tokens_seen,
                 "schedule_total_steps": schedule_total_steps,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -538,6 +618,8 @@ def train_model(
         "format": "qmini-final-model-v1",
         "step": steps,
         "tokens_seen": tokens_seen,
+        "supervised_tokens_seen": supervised_tokens_seen,
+        "loss_masked_training": train_masks is not None,
         "parameters": model.parameter_report()["total"],
         "packed_export": packed_path.name,
         "packed_export_bytes": packed_path.stat().st_size,
