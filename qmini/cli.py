@@ -33,10 +33,15 @@ def main():
     tok.add_argument("--data-dir", nargs="+", required=True); tok.add_argument("--output", required=True)
     tok.add_argument("--vocab-size", type=int, default=4096); tok.add_argument("--min-frequency", type=int, default=2)
     tok.add_argument("--base-config", default="configs/qmini_base.json"); tok.add_argument("--config-output", required=True)
+    tok.add_argument("--valid-fraction", type=float, default=0.02,
+        help="use the same document holdout fraction as data preparation")
     tok.add_argument("--overwrite", action="store_true")
     def do_tokenizer(args):
         from .tokenizer import train_tokenizer
-        t = train_tokenizer(args.data_dir, args.output, args.vocab_size, args.min_frequency, args.overwrite)
+        t = train_tokenizer(
+            args.data_dir, args.output, args.vocab_size, args.min_frequency,
+            args.overwrite, validation_fraction=args.valid_fraction
+        )
         cfg = QMiniConfig.from_json(args.base_config); cfg.vocab_size = t.get_vocab_size(); cfg.validate(); cfg.save(args.config_output)
         print("Tokenizer:", args.output, "vocab:", cfg.vocab_size, "config:", args.config_output); return 0
     tok.set_defaults(func=do_tokenizer)

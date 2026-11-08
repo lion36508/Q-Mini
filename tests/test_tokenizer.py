@@ -1,15 +1,32 @@
+import hashlib
+
 import pytest
 
+from qmini.data import iter_training_text_records
 from qmini.tokenizer import load_tokenizer, train_tokenizer
+
+
+def _is_validation(text: str, fraction: float) -> bool:
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / (2**64) < fraction
 
 
 def test_local_byte_bpe_round_trip_and_no_overwrite(tmp_path):
     corpus = tmp_path / "corpus.txt"
-    text = "Q-Mini learns carefully. Namaste नमस्ते 🌌\nSmall models need clean data."
-    corpus.write_text(text + "\n" + text, encoding="utf-8")
+    text = (
+        "Q-Mini learns carefully. Namaste नमस्ते 🌌\n"
+        "Small models need clean data."
+    )
+    corpus.write_text(
+        text + "\n\nA second independent training document for the tokenizer.",
+        encoding="utf-8",
+    )
     output = tmp_path / "tokenizer.json"
 
-    trained = train_tokenizer([corpus], output, vocab_size=300, min_frequency=1)
+    trained = train_tokenizer(
+        [corpus], output, vocab_size=300, min_frequency=1,
+        validation_fraction=0.02,
+    )
     loaded = load_tokenizer(output)
     encoded = loaded.encode(text)
     assert encoded.ids
@@ -18,3 +35,48 @@ def test_local_byte_bpe_round_trip_and_no_overwrite(tmp_path):
 
     with pytest.raises(FileExistsError):
         train_tokenizer([corpus], output, vocab_size=300, min_frequency=1)
+
+
+def test_tokenizer_iterator_excludes_validation_and_duplicate_documents(tmp_path):
+    train_doc = next(
+        f"training source document {index} contains enough words and details"
+        for index in range(100)
+        if not _is_validation(
+            f"training source document {index} contains enough words and details",
+            0.5,
+        )
+    )
+    valid_doc = next(
+        f"held out validation document {index} contains unique held out material"
+        for index in range(100)
+        if _is_validation(
+            f"held out validation document {index} contains unique held out material",
+            0.5,
+        )
+    )
+    corpus = tmp_path / "mixed.txt"
+    corpus.write_text(
+        train_doc + "\n\n" + valid_doc + "\n\n" + train_doc,
+        encoding="utf-8",
+    )
+    rows = list(iter_training_text_records([corpus], valid_fraction=0.5))
+    assert rows == [train_doc]
+    assert valid_doc not in rows
+
+
+def test_tokenizer_refuses_empty_training_partition(tmp_path):
+    validation_only = next(
+        f"held out only document {index} must not be used for tokenizer training"
+        for index in range(100)
+        if _is_validation(
+            f"held out only document {index} must not be used for tokenizer training",
+            0.999,
+        )
+    )
+    corpus = tmp_path / "validation.txt"
+    corpus.write_text(validation_only, encoding="utf-8")
+    with pytest.raises(ValueError, match="No unique training documents"):
+        train_tokenizer(
+            [corpus], tmp_path / "tokenizer.json",
+            vocab_size=300, min_frequency=1, validation_fraction=0.999,
+        )

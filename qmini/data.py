@@ -143,6 +143,52 @@ def iter_text_records(paths: Iterable[str | Path]) -> Iterator[str]:
             yield text
 
 
+def iter_training_text_records(
+    paths: Iterable[str | Path],
+    valid_fraction: float = 0.02,
+) -> Iterator[str]:
+    """Yield unique training documents only, using the same deterministic split as preparation.
+
+    Exact de-duplication is backed by a temporary SQLite index rather than an
+    in-memory set, so large corpora do not require RAM proportional to document count.
+    """
+    if not 0.0 <= valid_fraction < 0.5:
+        raise ValueError("valid_fraction must be in [0, 0.5).")
+    source_paths = expand_data_paths(paths)
+    if not source_paths:
+        raise FileNotFoundError("No supported dataset files were found.")
+
+    with tempfile.TemporaryDirectory(prefix="qmini-tokenizer-") as temp_dir:
+        database_path = Path(temp_dir) / "seen.sqlite3"
+        connection = sqlite3.connect(database_path)
+        yielded = 0
+        try:
+            connection.execute("CREATE TABLE seen (digest BLOB PRIMARY KEY)")
+            for document in iter_text_records(source_paths):
+                normalized = document.strip()
+                if len(normalized) < 2:
+                    continue
+                digest = hashlib.sha256(
+                    normalized.encode("utf-8", errors="replace")
+                ).digest()
+                validation_score = int.from_bytes(digest[:8], "big") / (2**64)
+                if validation_score < valid_fraction:
+                    continue
+                inserted = connection.execute(
+                    "INSERT OR IGNORE INTO seen(digest) VALUES (?)", (digest,)
+                )
+                if inserted.rowcount == 1:
+                    yielded += 1
+                    yield normalized
+            if yielded == 0:
+                raise ValueError(
+                    "No unique training documents remain after the validation split. "
+                    "Add more documents or use a smaller valid_fraction."
+                )
+        finally:
+            connection.close()
+
+
 def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool]:
     """Return (text, target-loss) segments, structured flag, assistant-target flag."""
     if isinstance(record, dict):
