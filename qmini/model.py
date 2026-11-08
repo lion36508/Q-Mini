@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -11,6 +12,8 @@ from .quantization import fake_quantize_int8, quantize_quaternary
 
 
 class RMSNorm(nn.Module):
+    """RMS normalization evaluated in FP32 for numerical stability."""
+
     def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
@@ -22,13 +25,15 @@ class RMSNorm(nn.Module):
 
 
 class QLinear(nn.Linear):
-    """Linear projection using quaternary master weights and INT8 activations."""
+    """Quaternary weight-aware projection with per-token INT8 fake quantization."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(fake_quantize_int8(x), quantize_quaternary(self.weight), self.bias)
 
 
 class QEmbedding(nn.Module):
+    """Tied token embedding and language-model output projection."""
+
     def __init__(self, vocab_size: int, dim: int):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(vocab_size, dim))
@@ -45,13 +50,15 @@ class QEmbedding(nn.Module):
 
 
 class CausalGatedDepthwiseConv(nn.Module):
-    """Causal sequence mixer: left padding only, so future tokens cannot leak backward."""
+    """Strictly causal depthwise convolution with a token-by-token streaming path."""
 
     def __init__(self, config: QMiniConfig, dilation: int):
         super().__init__()
         dim = config.d_model
+        self.dim = dim
         self.kernel_size = config.kernel_size
         self.dilation = dilation
+        self.history_length = dilation * (self.kernel_size - 1)
         self.content_gate = QLinear(dim, dim * 2)
         self.depthwise_weight = nn.Parameter(torch.empty(dim, 1, self.kernel_size))
         self.depthwise_bias = nn.Parameter(torch.zeros(dim))
@@ -59,20 +66,67 @@ class CausalGatedDepthwiseConv(nn.Module):
         self.output = QLinear(dim, dim)
         self.dropout = nn.Dropout(config.dropout)
 
+    def _kernel(self) -> torch.Tensor:
+        return quantize_quaternary(
+            self.depthwise_weight.reshape(self.dim, self.kernel_size)
+        ).reshape_as(self.depthwise_weight)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3 or x.shape[-1] != self.dim:
+            raise ValueError("Convolution input must have shape [batch, sequence, d_model].")
         content, gate = self.content_gate(x).chunk(2, dim=-1)
         content = fake_quantize_int8(content).transpose(1, 2)
-        left_pad = self.dilation * (self.kernel_size - 1)
-        content = F.pad(content, (left_pad, 0))
-        kernel = quantize_quaternary(
-            self.depthwise_weight.reshape(self.depthwise_weight.shape[0], -1)
-        ).reshape_as(self.depthwise_weight)
+        content = F.pad(content, (self.history_length, 0))
         mixed = F.conv1d(
-            content, kernel, self.depthwise_bias, stride=1,
-            padding=0, dilation=self.dilation,
-            groups=self.depthwise_weight.shape[0],
+            content,
+            self._kernel(),
+            self.depthwise_bias,
+            stride=1,
+            padding=0,
+            dilation=self.dilation,
+            groups=self.dim,
         ).transpose(1, 2)
         return self.dropout(self.output(F.silu(mixed) * torch.sigmoid(gate)))
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        cache: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process one token; cache holds the previous projected content values."""
+        if x.ndim != 2 or x.shape[-1] != self.dim:
+            raise ValueError("Streaming convolution input must have shape [batch, d_model].")
+        content, gate = self.content_gate(x).chunk(2, dim=-1)
+        content = fake_quantize_int8(content)
+        batch = x.shape[0]
+
+        if self.history_length:
+            if cache is None:
+                cache = content.new_zeros((batch, self.history_length, self.dim))
+            elif cache.shape != (batch, self.history_length, self.dim):
+                raise ValueError("Streaming convolution cache has an incompatible shape.")
+            elif cache.device != content.device or cache.dtype != content.dtype:
+                raise ValueError("Streaming convolution cache device/dtype differs from the model.")
+            window = torch.cat((cache, content.unsqueeze(1)), dim=1)
+            next_cache = window[:, 1:, :].contiguous()
+        else:
+            window = content.unsqueeze(1)
+            next_cache = window[:, :0, :].contiguous()
+
+        mixed = F.conv1d(
+            window.transpose(1, 2),
+            self._kernel(),
+            self.depthwise_bias,
+            stride=1,
+            padding=0,
+            dilation=self.dilation,
+            groups=self.dim,
+        )
+        if mixed.shape[-1] != 1:
+            raise RuntimeError("Streaming convolution did not produce exactly one output step.")
+        mixed = mixed.squeeze(-1)
+        output = self.dropout(self.output(F.silu(mixed) * torch.sigmoid(gate)))
+        return output, next_cache
 
 
 class SparseExpert(nn.Module):
@@ -86,12 +140,15 @@ class SparseExpert(nn.Module):
 
 
 class SparseTop1MoE(nn.Module):
+    """Token-level Top-1 dispatch with a differentiable selected expert gate."""
+
     def __init__(self, config: QMiniConfig):
         super().__init__()
         self.router_norm = RMSNorm(config.d_model, config.rms_norm_eps)
         self.router = QLinear(config.d_model, config.n_experts)
         self.experts = nn.ModuleList([
-            SparseExpert(config.d_model, config.d_hidden) for _ in range(config.n_experts)
+            SparseExpert(config.d_model, config.d_hidden)
+            for _ in range(config.n_experts)
         ])
         self.n_experts = config.n_experts
 
@@ -112,11 +169,18 @@ class SparseTop1MoE(nn.Module):
             if indices.numel():
                 expert_input = flat.index_select(0, indices)
                 expert_output = expert(expert_input)
-                expert_gate = selected_weights.index_select(0, indices).to(expert_output.dtype)
-                output = output.index_copy(0, indices, expert_output * expert_gate)
+                gate = selected_weights.index_select(0, indices).to(expert_output.dtype)
+                output = output.index_copy(0, indices, expert_output * gate)
 
         counts = torch.bincount(selected, minlength=self.n_experts)
         return output.reshape(shape), aux_loss, counts
+
+    def forward_step(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The same dispatch logic for a single [batch, d_model] token batch."""
+        if x.ndim != 2:
+            raise ValueError("MoE streaming input must have shape [batch, d_model].")
+        output, aux_loss, counts = self.forward(x)
+        return output, aux_loss, counts
 
 
 class QMiniBlock(nn.Module):
@@ -131,6 +195,26 @@ class QMiniBlock(nn.Module):
         x = x + self.mixer(self.mix_norm(x))
         expert_output, aux_loss, counts = self.moe(self.moe_norm(x))
         return x + expert_output, aux_loss, counts
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        cache: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        mixed, next_cache = self.mixer.forward_step(self.mix_norm(x), cache)
+        x = x + mixed
+        expert_output, aux_loss, counts = self.moe.forward_step(self.moe_norm(x))
+        return x + expert_output, aux_loss, counts, next_cache
+
+
+@dataclass
+class QMiniStreamState:
+    """Per-layer causal-convolution history for incremental autoregressive decoding."""
+
+    caches: list[torch.Tensor | None]
+    thinking_steps: int
+    batch_size: int
+    tokens_processed: int = 0
 
 
 class QMiniMoE(nn.Module):
@@ -150,16 +234,22 @@ class QMiniMoE(nn.Module):
     def forward(self, input_ids: torch.Tensor, thinking_steps: int | None = None) -> dict[str, Any]:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
-        sequence_length = int(input_ids.shape[1])
-        if not 1 <= sequence_length <= self.config.max_context:
+        if input_ids.shape[1] < 1 or input_ids.shape[1] > self.config.max_context:
             raise ValueError(f"Sequence length must be in [1, {self.config.max_context}].")
         if input_ids.shape[0] < 1:
             raise ValueError("Batch size must be at least one.")
+        if input_ids.numel() and (
+            int(input_ids.min()) < 0 or int(input_ids.max()) >= self.config.vocab_size
+        ):
+            raise ValueError("input_ids contain token IDs outside the configured vocabulary.")
+
         steps = self.config.thinking_steps if thinking_steps is None else int(thinking_steps)
         if not 1 <= steps <= self.config.max_thinking_steps:
             raise ValueError(f"thinking_steps must be 1..{self.config.max_thinking_steps}.")
+
         x = self.embedding(input_ids.long())
-        aux_losses, router_counts = [], []
+        aux_losses: list[torch.Tensor] = []
+        router_counts: list[torch.Tensor] = []
         for block in self.blocks:
             x, aux, counts = block(x)
             aux_losses.append(aux)
@@ -174,6 +264,84 @@ class QMiniMoE(nn.Module):
             "aux_loss": torch.stack(aux_losses).mean(),
             "router_counts": router_counts,
         }
+
+    def new_stream_state(
+        self,
+        batch_size: int,
+        thinking_steps: int | None = None,
+    ) -> QMiniStreamState:
+        if self.training:
+            raise RuntimeError("Incremental inference requires model.eval().")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive.")
+        steps = self.config.thinking_steps if thinking_steps is None else int(thinking_steps)
+        if not 1 <= steps <= self.config.max_thinking_steps:
+            raise ValueError(f"thinking_steps must be 1..{self.config.max_thinking_steps}.")
+        return QMiniStreamState(
+            caches=[None] * (self.config.n_layers + steps),
+            thinking_steps=steps,
+            batch_size=batch_size,
+        )
+
+    def forward_step(
+        self,
+        input_ids: torch.Tensor,
+        state: QMiniStreamState | None = None,
+        thinking_steps: int | None = None,
+    ) -> tuple[dict[str, Any], QMiniStreamState]:
+        """Run one autoregressive token without recomputing the preceding context."""
+        if self.training:
+            raise RuntimeError("Incremental inference requires model.eval().")
+        if input_ids.ndim == 2 and input_ids.shape[1] == 1:
+            input_ids = input_ids[:, 0]
+        if input_ids.ndim != 1 or input_ids.shape[0] < 1:
+            raise ValueError("forward_step expects token IDs shaped [batch] or [batch, 1].")
+        if input_ids.numel() and (
+            int(input_ids.min()) < 0 or int(input_ids.max()) >= self.config.vocab_size
+        ):
+            raise ValueError("input_ids contain token IDs outside the configured vocabulary.")
+
+        if state is None:
+            state = self.new_stream_state(input_ids.shape[0], thinking_steps)
+        elif state.batch_size != input_ids.shape[0]:
+            raise ValueError("Streaming state batch size does not match input.")
+        elif thinking_steps is not None and int(thinking_steps) != state.thinking_steps:
+            raise ValueError("thinking_steps cannot change in the middle of a stream.")
+        if len(state.caches) != self.config.n_layers + state.thinking_steps:
+            raise ValueError("Streaming state does not match this model configuration.")
+
+        x = self.embedding(input_ids.long())
+        new_caches: list[torch.Tensor | None] = []
+        aux_losses: list[torch.Tensor] = []
+        router_counts: list[torch.Tensor] = []
+
+        for index, block in enumerate(self.blocks):
+            x, aux, counts, cache = block.forward_step(x, state.caches[index])
+            new_caches.append(cache)
+            aux_losses.append(aux)
+            router_counts.append(counts)
+
+        offset = self.config.n_layers
+        for index in range(state.thinking_steps):
+            x, aux, counts, cache = self.refinement.forward_step(
+                x, state.caches[offset + index]
+            )
+            new_caches.append(cache)
+            aux_losses.append(aux)
+            router_counts.append(counts)
+
+        logits = self.embedding.project(self.final_norm(x))
+        new_state = QMiniStreamState(
+            caches=new_caches,
+            thinking_steps=state.thinking_steps,
+            batch_size=state.batch_size,
+            tokens_processed=state.tokens_processed + 1,
+        )
+        return {
+            "logits": logits,
+            "aux_loss": torch.stack(aux_losses).mean(),
+            "router_counts": router_counts,
+        }, new_state
 
     def parameter_report(self) -> dict[str, int]:
         return {
