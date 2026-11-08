@@ -64,6 +64,37 @@ def test_tokenizer_iterator_excludes_validation_and_duplicate_documents(tmp_path
     assert valid_doc not in rows
 
 
+def test_tokenizer_matches_rebalanced_prepare_split(tmp_path):
+    from qmini.data import prepare_token_streams
+
+    train_docs = []
+    for index in range(100):
+        text = f"training document {index} contains unique words for tokenizer split validation"
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        score = int.from_bytes(digest[:8], "big") / (2**64)
+        if score >= 0.02:
+            train_docs.append((digest, text))
+        if len(train_docs) == 2:
+            break
+    assert len(train_docs) == 2
+    # Both docs initially hash to train. Preparation moves the smallest digest to validation.
+    expected_train = max(train_docs, key=lambda pair: pair[0])[1]
+    source = tmp_path / "small-corpus.txt"
+    source.write_text(train_docs[0][1] + "\n\n" + train_docs[1][1], encoding="utf-8")
+
+    tokenizer_rows = list(iter_training_text_records([source], valid_fraction=0.02))
+    assert tokenizer_rows == [expected_train]
+
+    from qmini.tokenizer import train_tokenizer
+    tokenizer_path = tmp_path / "small-tokenizer.json"
+    train_tokenizer([source], tokenizer_path, vocab_size=300, min_frequency=1)
+    report = prepare_token_streams(
+        [source], tokenizer_path, tmp_path / "small-token-streams",
+        valid_fraction=0.02, loss_mask_mode="all",
+    )
+    assert report["train_documents"] == 1
+    assert report["valid_documents"] == 1
+
 def test_tokenizer_refuses_empty_training_partition(tmp_path):
     validation_only = next(
         f"held out only document {index} must not be used for tokenizer training"

@@ -147,25 +147,75 @@ def iter_training_text_records(
     paths: Iterable[str | Path],
     valid_fraction: float = 0.02,
 ) -> Iterator[str]:
-    """Yield unique training documents only, using the same deterministic split as preparation.
+    """Yield only unique training documents using the exact preparation split.
 
-    Exact de-duplication is backed by a temporary SQLite index rather than an
-    in-memory set, so large corpora do not require RAM proportional to document count.
+    The split plan is built in a disk-backed SQLite index. If hashing assigns every
+    document to one side, the same deterministic rebalancing rule as
+    prepare_token_streams() moves one digest to the other side. This prevents
+    tokenizer/validation leakage for small corpora.
     """
-    if not 0.0 <= valid_fraction < 0.5:
-        raise ValueError("valid_fraction must be in [0, 0.5).")
+    if not 0.0 < valid_fraction < 0.5:
+        raise ValueError("valid_fraction must be greater than 0 and below 0.5.")
     source_paths = expand_data_paths(paths)
     if not source_paths:
         raise FileNotFoundError("No supported dataset files were found.")
 
     with tempfile.TemporaryDirectory(prefix="qmini-tokenizer-") as temp_dir:
-        database_path = Path(temp_dir) / "seen.sqlite3"
+        database_path = Path(temp_dir) / "split.sqlite3"
         connection = sqlite3.connect(database_path)
         yielded = 0
         try:
             connection.execute("PRAGMA journal_mode=OFF")
             connection.execute("PRAGMA synchronous=OFF")
-            connection.execute("CREATE TABLE seen (digest BLOB PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE documents (digest BLOB PRIMARY KEY, is_valid INTEGER NOT NULL)"
+            )
+            connection.execute("CREATE TABLE written (digest BLOB PRIMARY KEY)")
+
+            # First pass: use the exact same deterministic hash split as preparation.
+            with connection:
+                for document in iter_text_records(source_paths):
+                    normalized = document.strip()
+                    if len(normalized) < 2:
+                        continue
+                    digest = hashlib.sha256(
+                        normalized.encode("utf-8", errors="replace")
+                    ).digest()
+                    score = int.from_bytes(digest[:8], "big") / (2**64)
+                    connection.execute(
+                        "INSERT OR IGNORE INTO documents(digest, is_valid) VALUES (?, ?)",
+                        (digest, int(score < valid_fraction)),
+                    )
+
+            unique_count = int(connection.execute(
+                "SELECT COUNT(*) FROM documents"
+            ).fetchone()[0])
+            if unique_count < 2:
+                raise ValueError(
+                    "At least two unique documents are required for a separated "
+                    "training/validation tokenizer split."
+                )
+
+            valid_count = int(connection.execute(
+                "SELECT COUNT(*) FROM documents WHERE is_valid=1"
+            ).fetchone()[0])
+            if valid_count == 0:
+                chosen = connection.execute(
+                    "SELECT digest FROM documents ORDER BY digest LIMIT 1"
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE documents SET is_valid=1 WHERE digest=?", (chosen,)
+                )
+            elif valid_count == unique_count:
+                chosen = connection.execute(
+                    "SELECT digest FROM documents ORDER BY digest DESC LIMIT 1"
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE documents SET is_valid=0 WHERE digest=?", (chosen,)
+                )
+            connection.commit()
+
+            # Second pass: only emit unique documents assigned to the train split.
             for document in iter_text_records(source_paths):
                 normalized = document.strip()
                 if len(normalized) < 2:
@@ -173,22 +223,23 @@ def iter_training_text_records(
                 digest = hashlib.sha256(
                     normalized.encode("utf-8", errors="replace")
                 ).digest()
-                validation_score = int.from_bytes(digest[:8], "big") / (2**64)
-                if validation_score < valid_fraction:
-                    continue
+                row = connection.execute(
+                    "SELECT is_valid FROM documents WHERE digest=?", (digest,)
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("Source data changed during tokenizer training.")
                 inserted = connection.execute(
-                    "INSERT OR IGNORE INTO seen(digest) VALUES (?)", (digest,)
+                    "INSERT OR IGNORE INTO written(digest) VALUES (?)", (digest,)
                 )
-                if inserted.rowcount == 1:
-                    yielded += 1
-                    if yielded % 10000 == 0:
-                        connection.commit()
-                    yield normalized
+                if inserted.rowcount == 0 or int(row[0]) == 1:
+                    continue
+                yielded += 1
+                if yielded % 10000 == 0:
+                    connection.commit()
+                yield normalized
+
             if yielded == 0:
-                raise ValueError(
-                    "No unique training documents remain after the validation split. "
-                    "Add more documents or use a smaller valid_fraction."
-                )
+                raise ValueError("No unique training documents remain for tokenizer training.")
         finally:
             connection.close()
 
