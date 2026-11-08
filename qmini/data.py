@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -14,6 +15,7 @@ SUPPORTED_SUFFIXES = {
     ".txt", ".text", ".md", ".markdown", ".json",
     ".jsonl", ".ndjson", ".csv", ".parquet",
 }
+ASSISTANT_ROLES = {"assistant", "bot", "model"}
 
 
 def expand_data_paths(paths: Iterable[str | Path]) -> list[Path]:
@@ -96,7 +98,8 @@ def _iter_plain(path: Path, chunk_chars: int = 8192) -> Iterator[str]:
         yield "\n".join(buffer)
 
 
-def iter_text_records(paths: Iterable[str | Path]) -> Iterator[str]:
+def iter_source_records(paths: Iterable[str | Path]) -> Iterator[object]:
+    """Yield source records without flattening away chat roles."""
     for path in expand_data_paths(paths):
         suffix = path.suffix.lower()
         if suffix in {".txt", ".text", ".md", ".markdown"}:
@@ -104,30 +107,21 @@ def iter_text_records(paths: Iterable[str | Path]) -> Iterator[str]:
         elif suffix == ".json":
             with path.open("r", encoding="utf-8-sig") as handle:
                 payload = json.load(handle)
-            for item in payload if isinstance(payload, list) else [payload]:
-                text = extract_text(item).strip()
-                if text:
-                    yield text
+            yield from (payload if isinstance(payload, list) else [payload])
         elif suffix in {".jsonl", ".ndjson"}:
             with path.open("r", encoding="utf-8-sig") as handle:
                 for line_number, line in enumerate(handle, 1):
                     if not line.strip():
                         continue
                     try:
-                        record = json.loads(line)
+                        yield json.loads(line)
                     except json.JSONDecodeError as exc:
                         raise ValueError(
                             f"Invalid JSON in {path} at line {line_number}: {exc}"
                         ) from exc
-                    text = extract_text(record).strip()
-                    if text:
-                        yield text
         elif suffix == ".csv":
             with path.open("r", encoding="utf-8-sig", newline="") as handle:
-                for row in csv.DictReader(handle):
-                    text = extract_text(row).strip()
-                    if text:
-                        yield text
+                yield from csv.DictReader(handle)
         elif suffix == ".parquet":
             try:
                 import pyarrow.parquet as pq
@@ -139,10 +133,105 @@ def iter_text_records(paths: Iterable[str | Path]) -> Iterator[str]:
             for batch in parquet.iter_batches(batch_size=512):
                 columns = batch.to_pydict()
                 for index in range(batch.num_rows):
-                    row = {key: values[index] for key, values in columns.items()}
-                    text = extract_text(row).strip()
-                    if text:
-                        yield text
+                    yield {key: values[index] for key, values in columns.items()}
+
+
+def iter_text_records(paths: Iterable[str | Path]) -> Iterator[str]:
+    for record in iter_source_records(paths):
+        text = extract_text(record).strip()
+        if text:
+            yield text
+
+
+def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool]:
+    """Return (text, target-loss) segments, structured flag, assistant-target flag."""
+    if isinstance(record, dict):
+        messages = record.get("messages")
+        if isinstance(messages, list):
+            segments: list[tuple[str, bool]] = []
+            has_assistant = False
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role", "unknown")).strip().lower()
+                body = extract_text(message.get("content", message.get("text", ""))).strip()
+                if not body:
+                    continue
+                is_assistant = role in ASSISTANT_ROLES
+                has_assistant = has_assistant or is_assistant
+                segments.append((f"[{role.upper()}]\n", is_assistant))
+                segments.append((body + "\n", is_assistant))
+            if segments:
+                return segments, True, has_assistant
+
+        user_fields = ("instruction", "input", "prompt", "question")
+        assistant_fields = ("completion", "output", "answer", "response")
+        user_text = "\n".join(
+            extract_text(record[key]).strip()
+            for key in user_fields
+            if record.get(key) is not None and extract_text(record[key]).strip()
+        )
+        assistant_text = "\n".join(
+            extract_text(record[key]).strip()
+            for key in assistant_fields
+            if record.get(key) is not None and extract_text(record[key]).strip()
+        )
+        if user_text and assistant_text:
+            return [
+                ("[USER]\n", False),
+                (user_text + "\n", False),
+                ("[ASSISTANT]\n", True),
+                (assistant_text + "\n", True),
+            ], True, True
+
+    text = extract_text(record).strip()
+    if not text:
+        return [], False, False
+    return [(text, True)], False, True
+
+
+def _encode_record(
+    record: object,
+    tokenizer,
+    bos_id: int,
+    eos_id: int,
+    loss_mask_mode: str,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    segments, structured, has_assistant = _record_segments(record)
+    if not segments:
+        return None
+
+    if loss_mask_mode == "assistant" and (not structured or not has_assistant):
+        return None
+
+    ids = [bos_id]
+    mask = [0]
+    for segment, assistant_target in segments:
+        encoded = tokenizer.encode(segment).ids
+        if not encoded:
+            continue
+        ids.extend(encoded)
+        if loss_mask_mode == "all" or not structured:
+            mask.extend([1] * len(encoded))
+        elif loss_mask_mode == "assistant":
+            mask.extend([int(assistant_target)] * len(encoded))
+        else:  # auto: train assistant turns only for structured chat/Q&A records.
+            mask.extend([int(assistant_target)] * len(encoded))
+
+    eos_is_target = (
+        loss_mask_mode == "all"
+        or not structured
+        or (loss_mask_mode in {"auto", "assistant"} and has_assistant)
+    )
+    ids.append(eos_id)
+    mask.append(int(eos_is_target))
+
+    if not any(mask):
+        return None
+    return (
+        np.asarray(ids, dtype=np.uint16),
+        np.asarray(mask, dtype=np.uint8),
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -182,18 +271,21 @@ def prepare_token_streams(
     tokenizer_path: str | Path,
     output_dir: str | Path,
     valid_fraction: float = 0.02,
+    loss_mask_mode: str = "auto",
 ) -> dict[str, object]:
-    """Build deduplicated document-separated token streams with a reproducible split.
+    """Prepare deduplicated train/validation token and assistant-loss-mask streams.
 
-    Exact duplicate documents are removed using a temporary SQLite index, so the
-    de-duplication index remains disk-backed instead of growing with corpus RAM.
-    A deterministic hash split is used, with a guaranteed non-empty train/valid
-    partition whenever at least two unique documents are available.
+    loss_mask_mode:
+      auto      - general text trains all tokens; chat/Q&A records train assistant outputs.
+      all       - ordinary next-token pretraining over every token.
+      assistant - only structured assistant responses contribute to loss.
     """
     from .tokenizer import load_tokenizer, special_token_id
 
     if not 0.0 < valid_fraction < 0.5:
         raise ValueError("valid_fraction must be greater than 0 and below 0.5.")
+    if loss_mask_mode not in {"auto", "all", "assistant"}:
+        raise ValueError("loss_mask_mode must be one of: auto, all, assistant.")
 
     paths = expand_data_paths(data_paths)
     if not paths:
@@ -203,13 +295,17 @@ def prepare_token_streams(
     target.mkdir(parents=True, exist_ok=True)
     train_path = target / "train.bin"
     valid_path = target / "valid.bin"
+    train_mask_path = target / "train.mask.bin"
+    valid_mask_path = target / "valid.mask.bin"
     manifest_path = target / "dataset.json"
-    if train_path.exists() or valid_path.exists() or manifest_path.exists():
+    output_paths = (train_path, valid_path, train_mask_path, valid_mask_path, manifest_path)
+    if any(path.exists() for path in output_paths):
         raise FileExistsError(
             f"Existing dataset artifacts in {target} are preserved; choose a new output directory."
         )
 
-    tokenizer = load_tokenizer(tokenizer_path)
+    tokenizer_path_obj = Path(tokenizer_path)
+    tokenizer = load_tokenizer(tokenizer_path_obj)
     bos_id = special_token_id(tokenizer, "<bos>")
     eos_id = special_token_id(tokenizer, "<eos>")
     vocab_size = tokenizer.get_vocab_size()
@@ -217,15 +313,26 @@ def prepare_token_streams(
         raise ValueError("uint16 token streams support vocabulary sizes up to 65,535.")
 
     source_manifest_before = _file_manifest(paths)
-    database_path = target / ".qmini_dedup.sqlite3"
-    train_tmp = target / "train.bin.tmp"
-    valid_tmp = target / "valid.bin.tmp"
+    fd, database_name = tempfile.mkstemp(
+        prefix=".qmini_dedup_", suffix=".sqlite3", dir=target
+    )
+    os.close(fd)
+    database_path = Path(database_name)
+    temp_outputs = [
+        target / "train.bin.tmp",
+        target / "valid.bin.tmp",
+        target / "train.mask.bin.tmp",
+        target / "valid.mask.bin.tmp",
+    ]
     stats: dict[str, object] = {
         "unique_documents": 0,
         "duplicate_documents": 0,
         "skipped_short_documents": 0,
+        "skipped_without_targets": 0,
         "train_tokens": 0,
         "valid_tokens": 0,
+        "train_target_tokens": 0,
+        "valid_target_tokens": 0,
         "train_documents": 0,
         "valid_documents": 0,
     }
@@ -237,18 +344,18 @@ def prepare_token_streams(
         connection.execute(
             "CREATE TABLE documents (digest BLOB PRIMARY KEY, is_valid INTEGER NOT NULL)"
         )
-        connection.execute(
-            "CREATE TABLE written (digest BLOB PRIMARY KEY)"
-        )
+        connection.execute("CREATE TABLE written (digest BLOB PRIMARY KEY)")
 
-        # First pass: build a bounded-memory exact-document dedup index.
+        # First pass: exact-content de-dup index stored on disk, not in Python RAM.
         with connection:
-            for document in iter_text_records(paths):
-                normalized = document.strip()
+            for record in iter_source_records(paths):
+                normalized = extract_text(record).strip()
                 if len(normalized) < 2:
                     stats["skipped_short_documents"] += 1
                     continue
-                digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).digest()
+                digest = hashlib.sha256(
+                    normalized.encode("utf-8", errors="replace")
+                ).digest()
                 valid = int.from_bytes(digest[:8], "big") / (2**64) < valid_fraction
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO documents(digest, is_valid) VALUES (?, ?)",
@@ -262,7 +369,7 @@ def prepare_token_streams(
         unique_count = int(stats["unique_documents"])
         if unique_count < 2:
             raise ValueError(
-                "At least two unique documents are required to create separate train and validation sets."
+                "At least two unique documents are required for non-empty train and validation sets."
             )
 
         valid_count = int(connection.execute(
@@ -280,13 +387,20 @@ def prepare_token_streams(
             connection.execute("UPDATE documents SET is_valid=0 WHERE digest=?", (chosen,))
         connection.commit()
 
-        # Second pass: stream each unique document into its deterministic split.
-        with train_tmp.open("wb") as train_file, valid_tmp.open("wb") as valid_file:
-            for document in iter_text_records(paths):
-                normalized = document.strip()
+        # Second pass: each unique source record is encoded once and split atomically.
+        with (
+            temp_outputs[0].open("wb") as train_file,
+            temp_outputs[1].open("wb") as valid_file,
+            temp_outputs[2].open("wb") as train_mask_file,
+            temp_outputs[3].open("wb") as valid_mask_file,
+        ):
+            for record in iter_source_records(paths):
+                normalized = extract_text(record).strip()
                 if len(normalized) < 2:
                     continue
-                digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).digest()
+                digest = hashlib.sha256(
+                    normalized.encode("utf-8", errors="replace")
+                ).digest()
                 row = connection.execute(
                     "SELECT is_valid FROM documents WHERE digest=?", (digest,)
                 ).fetchone()
@@ -298,57 +412,79 @@ def prepare_token_streams(
                 if inserted.rowcount == 0:
                     continue
 
-                token_ids = [bos_id, *tokenizer.encode(normalized).ids, eos_id]
-                if token_ids and max(token_ids) >= vocab_size:
+                encoded = _encode_record(
+                    record, tokenizer, bos_id, eos_id, loss_mask_mode
+                )
+                if encoded is None:
+                    stats["skipped_without_targets"] += 1
+                    continue
+                token_ids, loss_mask = encoded
+                if token_ids.size and int(token_ids.max()) >= vocab_size:
                     raise ValueError("Tokenizer emitted an ID outside its declared vocabulary.")
-                values = np.asarray(token_ids, dtype=np.uint16)
+                if token_ids.size != loss_mask.size:
+                    raise RuntimeError("Token and loss-mask lengths do not match.")
+                if not np.isin(loss_mask, (0, 1)).all():
+                    raise RuntimeError("Loss mask must contain only binary values.")
+
                 if int(row[0]) == 1:
-                    values.tofile(valid_file)
-                    stats["valid_tokens"] += int(values.size)
+                    token_ids.tofile(valid_file)
+                    loss_mask.tofile(valid_mask_file)
+                    stats["valid_tokens"] += int(token_ids.size)
+                    stats["valid_target_tokens"] += int(loss_mask.sum())
                     stats["valid_documents"] += 1
                 else:
-                    values.tofile(train_file)
-                    stats["train_tokens"] += int(values.size)
+                    token_ids.tofile(train_file)
+                    loss_mask.tofile(train_mask_file)
+                    stats["train_tokens"] += int(token_ids.size)
+                    stats["train_target_tokens"] += int(loss_mask.sum())
                     stats["train_documents"] += 1
 
-            train_file.flush()
-            valid_file.flush()
-            os.fsync(train_file.fileno())
-            os.fsync(valid_file.fileno())
+            for handle in (train_file, valid_file, train_mask_file, valid_mask_file):
+                handle.flush()
+                os.fsync(handle.fileno())
 
         source_manifest_after = _file_manifest(paths)
         if source_manifest_after != source_manifest_before:
             raise RuntimeError("Source files changed while token streams were being prepared.")
-
         if int(stats["train_tokens"]) == 0 or int(stats["valid_tokens"]) == 0:
             raise RuntimeError("Token preparation produced an empty train or validation stream.")
+        if int(stats["train_target_tokens"]) == 0 or int(stats["valid_target_tokens"]) == 0:
+            raise RuntimeError(
+                "At least one split has no supervised target tokens. Add assistant answers "
+                "or use --loss-mask all for ordinary next-token pretraining."
+            )
 
-        os.replace(train_tmp, train_path)
-        os.replace(valid_tmp, valid_path)
+        for temporary, final in zip(temp_outputs, (
+            train_path, valid_path, train_mask_path, valid_mask_path
+        )):
+            os.replace(temporary, final)
 
         corpus_descriptor = json.dumps(
             source_manifest_before, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         metadata: dict[str, object] = {
-            "format": "qmini-token-stream-v2",
+            "format": "qmini-token-stream-v3",
             **stats,
             "vocab_size": int(vocab_size),
             "valid_fraction_requested": float(valid_fraction),
             "dtype": "uint16",
+            "loss_mask_dtype": "uint8",
+            "loss_mask_mode": loss_mask_mode,
             "deduplication": "exact-document-sha256",
             "source_files": source_manifest_before,
             "corpus_sha256": hashlib.sha256(corpus_descriptor).hexdigest(),
-            "tokenizer_sha256": _sha256_file(Path(tokenizer_path)),
+            "tokenizer_sha256": _sha256_file(tokenizer_path_obj),
+            "train_tokens_sha256": _sha256_file(train_path),
+            "valid_tokens_sha256": _sha256_file(valid_path),
+            "train_mask_sha256": _sha256_file(train_mask_path),
+            "valid_mask_sha256": _sha256_file(valid_mask_path),
         }
         _write_json_atomic(manifest_path, metadata)
         return metadata
 
     except Exception:
-        train_tmp.unlink(missing_ok=True)
-        valid_tmp.unlink(missing_ok=True)
-        train_path.unlink(missing_ok=True)
-        valid_path.unlink(missing_ok=True)
-        manifest_path.unlink(missing_ok=True)
+        for path in (*temp_outputs, *output_paths):
+            path.unlink(missing_ok=True)
         raise
     finally:
         connection.close()
