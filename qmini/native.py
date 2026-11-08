@@ -31,7 +31,13 @@ class NativeKernel:
     def __init__(self, library_path):
         self.path = Path(library_path).resolve()
         self.library = ctypes.CDLL(str(self.path))
-        self.function = self.library.qmini_linear_i8
+        try:
+            self.function = self.library.qmini_linear_i8
+            self.neon_function = self.library.qmini_kernel_has_neon
+        except AttributeError as exc:
+            raise RuntimeError(
+                "Native library is outdated. Rebuild it with: python -m qmini.native --build"
+            ) from exc
         i8 = np.ctypeslib.ndpointer(dtype=np.int8, flags="C_CONTIGUOUS")
         u8 = np.ctypeslib.ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS")
         f32 = np.ctypeslib.ndpointer(dtype=np.float32, flags="C_CONTIGUOUS")
@@ -40,22 +46,28 @@ class NativeKernel:
             ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ]
         self.function.restype = ctypes.c_int
-        self.neon_function = self.library.qmini_kernel_has_neon
         self.neon_function.argtypes = []
         self.neon_function.restype = ctypes.c_int
         self.uses_neon = bool(self.neon_function())
 
     def linear(self, activations_i8, packed_weights, weight_scales, activation_scales, bias=None):
-        x = np.ascontiguousarray(activations_i8, dtype=np.int8)
-        packed = np.ascontiguousarray(packed_weights, dtype=np.uint8)
+        raw_x = np.asarray(activations_i8)
+        raw_packed = np.asarray(packed_weights)
+        if raw_x.dtype != np.int8:
+            raise TypeError("activations_i8 must already be int8; silent narrowing is refused.")
+        if raw_packed.dtype != np.uint8:
+            raise TypeError("packed_weights must already be uint8.")
+        x = np.ascontiguousarray(raw_x)
+        packed = np.ascontiguousarray(raw_packed)
         ws = np.ascontiguousarray(weight_scales, dtype=np.float32)
         xs = np.ascontiguousarray(activation_scales, dtype=np.float32)
         if x.ndim != 2 or x.shape[0] < 1 or x.shape[1] < 1:
             raise ValueError("activations_i8 must have non-empty shape [rows, in_features].")
         if packed.ndim != 2 or ws.ndim != 1 or xs.ndim != 1:
             raise ValueError("Packed weights and scales have invalid ranks.")
-        if packed.shape[0] != ws.size or packed.shape[1] * 4 < x.shape[1]:
-            raise ValueError("Packed weight shape does not match activation dimensions.")
+        expected_bytes = (x.shape[1] + 3) // 4
+        if packed.shape[0] != ws.size or packed.shape[1] != expected_bytes:
+            raise ValueError("Packed weight shape does not exactly match activation dimensions.")
         if xs.shape != (x.shape[0],):
             raise ValueError("activation_scales must contain one scale per input row.")
         if not np.isfinite(ws).all() or np.any(ws <= 0):
@@ -106,7 +118,7 @@ def get_native_kernel() -> NativeKernel | None:
 
     try:
         loaded = NativeKernel(path)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         _NATIVE_KERNEL = None
         _NATIVE_CACHE_KEY = None
         raise RuntimeError(
