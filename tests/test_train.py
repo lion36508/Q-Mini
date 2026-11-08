@@ -4,6 +4,8 @@ import torch
 
 from qmini.export import verify_packed_export
 from qmini.train import _masked_cross_entropy, train_model
+from qmini.data import prepare_token_streams
+from qmini.tokenizer import train_tokenizer
 
 
 def _write_stream(path, vocab_size, length, seed):
@@ -148,4 +150,92 @@ def test_resume_rejects_changed_loss_mask(tiny_config, tmp_path):
             eval_every=1, save_every=1, eval_batches=1,
             resume=True, extend_schedule=True,
             train_mask_bin=train_mask, valid_mask_bin=valid_mask,
+        )
+
+
+
+def _prepare_chat_dataset(tmp_path, valid_fraction=0.25):
+    corpus = tmp_path / "chat.jsonl"
+    records = [
+        {"messages": [
+            {"role": "user", "content": f"Question number {index}: explain a scientific idea in detail."},
+            {"role": "assistant", "content": f"Answer number {index}: this verified response contains enough text to create a training sequence."},
+        ]}
+        for index in range(8)
+    ]
+    corpus.write_text(
+        "\n".join(__import__("json").dumps(item) for item in records),
+        encoding="utf-8",
+    )
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer = train_tokenizer(
+        [corpus], tokenizer_path, vocab_size=300, min_frequency=1,
+        validation_fraction=valid_fraction,
+    )
+    token_dir = tmp_path / "prepared"
+    report = prepare_token_streams(
+        [corpus], tokenizer_path, token_dir,
+        valid_fraction=valid_fraction, loss_mask_mode="auto",
+    )
+    return tokenizer, tokenizer_path, token_dir, report
+
+
+def test_training_requires_manifest_assistant_masks(tiny_config, tmp_path):
+    tokenizer, tokenizer_path, token_dir, report = _prepare_chat_dataset(tmp_path)
+    tiny_config.vocab_size = tokenizer.get_vocab_size()
+    tiny_config.validate()
+    assert report["loss_mask_mode"] == "auto"
+
+    with pytest.raises(ValueError, match="both train and validation loss-mask files are mandatory"):
+        train_model(
+            tiny_config,
+            token_dir / "train.bin",
+            token_dir / "valid.bin",
+            tmp_path / "run",
+            steps=1, batch_size=1, seq_len=2, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            tokenizer_path=tokenizer_path,
+        )
+
+
+def test_training_rejects_tokenizer_manifest_mismatch(tiny_config, tmp_path):
+    tokenizer, tokenizer_path, token_dir, report = _prepare_chat_dataset(tmp_path)
+    tiny_config.vocab_size = tokenizer.get_vocab_size()
+    tiny_config.validate()
+    wrong_tokenizer = tmp_path / "wrong-tokenizer.json"
+    wrong_tokenizer.write_bytes(tokenizer_path.read_bytes() + b" ")
+
+    with pytest.raises(ValueError, match="Tokenizer SHA-256"):
+        train_model(
+            tiny_config,
+            token_dir / "train.bin",
+            token_dir / "valid.bin",
+            tmp_path / "run",
+            steps=1, batch_size=1, seq_len=2, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            tokenizer_path=wrong_tokenizer,
+            train_mask_bin=token_dir / "train.mask.bin",
+            valid_mask_bin=token_dir / "valid.mask.bin",
+        )
+
+
+def test_training_rejects_modified_prepared_token_stream(tiny_config, tmp_path):
+    tokenizer, tokenizer_path, token_dir, report = _prepare_chat_dataset(tmp_path)
+    tiny_config.vocab_size = tokenizer.get_vocab_size()
+    tiny_config.validate()
+    values = np.memmap(token_dir / "train.bin", mode="r+", dtype=np.uint16)
+    values[0] = (int(values[0]) + 1) % tiny_config.vocab_size
+    del values
+
+    with pytest.raises(ValueError, match="Training token stream SHA-256"):
+        train_model(
+            tiny_config,
+            token_dir / "train.bin",
+            token_dir / "valid.bin",
+            tmp_path / "run",
+            steps=1, batch_size=1, seq_len=2, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            tokenizer_path=tokenizer_path,
+            train_mask_bin=token_dir / "train.mask.bin",
+            valid_mask_bin=token_dir / "valid.mask.bin",
         )

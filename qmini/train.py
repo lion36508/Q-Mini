@@ -200,6 +200,90 @@ def _atomic_json_save(payload: dict[str, Any], path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _verify_prepared_dataset_manifest(
+    train_path: str | Path,
+    valid_path: str | Path,
+    tokenizer_path: str | Path | None,
+    train_mask_path: str | Path | None,
+    valid_mask_path: str | Path | None,
+    vocab_size: int,
+) -> Path | None:
+    """Verify v3 preparation fingerprints and enforce assistant-loss masks.
+
+    Raw uint16 streams without a dataset manifest remain supported for advanced
+    callers. A v3 manifest, however, is a binding contract: every supplied file
+    must match its SHA-256, tokenizer vocabulary must match, and auto/assistant
+    chat datasets may not be trained without their response-only masks.
+    """
+    train_file = Path(train_path).resolve()
+    valid_file = Path(valid_path).resolve()
+    manifest_path = train_file.parent / "dataset.json"
+    if not manifest_path.is_file():
+        return None
+    if valid_file.parent != train_file.parent:
+        raise ValueError(
+            "Prepared train and validation streams must come from the same directory manifest."
+        )
+
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read prepared dataset manifest: {manifest_path}") from exc
+    if not isinstance(manifest, dict) or manifest.get("format") != "qmini-token-stream-v3":
+        raise ValueError(
+            "Unsupported or incomplete dataset manifest. Re-prepare into a new versioned "
+            "output directory rather than modifying existing artifacts."
+        )
+
+    if int(manifest.get("vocab_size", -1)) != int(vocab_size):
+        raise ValueError(
+            "Dataset manifest vocabulary does not match model config. "
+            "Use the active config saved alongside this tokenizer."
+        )
+    if tokenizer_path is None or not Path(tokenizer_path).is_file():
+        raise ValueError(
+            "A tokenizer file is required when training from a prepared dataset manifest."
+        )
+    actual_tokenizer_hash = _sha256_file(tokenizer_path)["sha256"]
+    if manifest.get("tokenizer_sha256") != actual_tokenizer_hash:
+        raise ValueError("Tokenizer SHA-256 does not match the prepared dataset manifest.")
+
+    artifacts = [
+        ("train_tokens_sha256", train_file, "Training token stream"),
+        ("valid_tokens_sha256", valid_file, "Validation token stream"),
+    ]
+    for field, artifact_path, label in artifacts:
+        expected = manifest.get(field)
+        actual = _sha256_file(artifact_path)["sha256"]
+        if not isinstance(expected, str) or expected != actual:
+            raise ValueError(f"{label} SHA-256 does not match the prepared dataset manifest.")
+
+    loss_mode = manifest.get("loss_mask_mode")
+    if loss_mode not in {"auto", "all", "assistant"}:
+        raise ValueError(f"Unsupported loss_mask_mode in dataset manifest: {loss_mode!r}.")
+    masks_required = loss_mode in {"auto", "assistant"}
+    if masks_required and (train_mask_path is None or valid_mask_path is None):
+        raise ValueError(
+            f"Prepared dataset uses loss_mask_mode={loss_mode!r}; both train and validation "
+            "loss-mask files are mandatory. Refusing to silently train on user/system prompts."
+        )
+
+    mask_artifacts = [
+        ("train_mask_sha256", train_mask_path, "Training loss mask"),
+        ("valid_mask_sha256", valid_mask_path, "Validation loss mask"),
+    ]
+    for field, artifact_path, label in mask_artifacts:
+        if artifact_path is None:
+            continue
+        expected = manifest.get(field)
+        actual = _sha256_file(artifact_path)["sha256"]
+        if not isinstance(expected, str) or expected != actual:
+            raise ValueError(f"{label} SHA-256 does not match the prepared dataset manifest.")
+
+    return manifest_path
+
+
 def _resume_contract(
     train_path: str | Path,
     valid_path: str | Path,
@@ -316,6 +400,10 @@ def train_model(
         raise ValueError("Provide both --train-mask-bin and --valid-mask-bin, or neither.")
     train_tokens = _load_tokens(train_bin, "Training")
     valid_tokens = _load_tokens(valid_bin, "Validation")
+    _verify_prepared_dataset_manifest(
+        train_bin, valid_bin, tokenizer_path,
+        train_mask_bin, valid_mask_bin, config.vocab_size,
+    )
     train_masks = _load_masks(train_mask_bin, train_tokens, "Training")
     valid_masks = _load_masks(valid_mask_bin, valid_tokens, "Validation")
     _validate_token_ids(train_tokens, config.vocab_size, "Training")

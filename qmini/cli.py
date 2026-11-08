@@ -64,8 +64,14 @@ def main():
     train.add_argument("--lr", type=float, default=3e-4); train.add_argument("--weight-decay", type=float, default=0.1)
     train.add_argument("--eval-every", type=int, default=250); train.add_argument("--save-every", type=int, default=250)
     train.add_argument("--eval-batches", type=int, default=20); train.add_argument("--resume", action="store_true")
-    train.add_argument("--train-mask-bin")
-    train.add_argument("--valid-mask-bin")
+    train.add_argument(
+        "--train-mask-bin",
+        help="aligned uint8 target mask; required for prepared auto/assistant datasets",
+    )
+    train.add_argument(
+        "--valid-mask-bin",
+        help="aligned uint8 validation target mask; required for prepared auto/assistant datasets",
+    )
     train.add_argument("--extend-schedule", action="store_true",
         help="explicitly extend the saved learning-rate schedule")
     train.add_argument("--allow-legacy-resume", action="store_true",
