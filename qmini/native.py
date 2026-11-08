@@ -123,7 +123,14 @@ def native_kernel_status() -> dict[str, str | bool]:
     return {
         "available": kernel is not None,
         "path": str(path),
-        "backend": "native-int8-quaternary" if kernel is not None else "pytorch-fallback",
+        "backend": (
+            "native-int8-quaternary-neon"
+            if kernel is not None and kernel.uses_neon
+            else "native-int8-quaternary-scalar"
+            if kernel is not None
+            else "pytorch-fallback"
+        ),
+        "uses_neon": bool(kernel.uses_neon) if kernel is not None else False,
     }
 
 

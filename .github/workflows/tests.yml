@@ -32,6 +32,13 @@ jobs:
           python -c "import torch; print('PyTorch:', torch.__version__, '| CUDA build:', torch.version.cuda); assert torch.version.cuda is None"
       - name: Compile C++ projection primitive
         run: bash scripts/build_native_kernel.sh
+      - name: Cross-compile ARM64 NEON kernel
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu
+          aarch64-linux-gnu-g++ -O3 -DNDEBUG -std=c++17 -fPIC -shared \
+            qmini/native_kernel.cpp -o /tmp/libqmini_kernel_aarch64.so
+          file /tmp/libqmini_kernel_aarch64.so
       - name: Run tests
         run: pytest -q
       - name: Run audit and CLI checks

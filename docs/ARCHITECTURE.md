@@ -41,7 +41,7 @@ The authoritative parameter count is computed from `sum(p.numel() for p in model
 
 ## Native runtime boundary
 
-The native kernel covers the dense linear projections only. Causal depthwise convolution, RMSNorm, token embedding lookup, sparse dispatch and state management remain PyTorch operations. This is intentionally a hybrid runtime; it must not be described as a full integer-only or fully native ARM64 model.
+The native kernel covers dense linear projections only. AArch64/NEON builds use vector widening multiply and pairwise integer accumulation for the INT8-by-quaternary dot product; other targets use the scalar integer fallback. Causal depthwise convolution, RMSNorm, token embedding lookup, sparse dispatch and state management remain PyTorch operations. This is intentionally a hybrid runtime; it must not be described as a full integer-only or fully native ARM64 model. CI cross-compiles the C++ primitive for AArch64, but only a real Android device benchmark can establish phone performance.
 
 
 ## Local memory boundary

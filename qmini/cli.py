@@ -26,6 +26,7 @@ def main():
         from .native import native_kernel_status
         native = native_kernel_status()
         print("CPU projection backend:", native["backend"])
+        print("ARM NEON:", native["uses_neon"])
         print("Native library:", native["path"])
         print("Attention/QKV: absent by design"); return 0
     audit.set_defaults(func=do_audit)
