@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,7 +29,8 @@ def build_kernel(output=None):
 
 class NativeKernel:
     def __init__(self, library_path):
-        self.library = ctypes.CDLL(str(library_path))
+        self.path = Path(library_path).resolve()
+        self.library = ctypes.CDLL(str(self.path))
         self.function = self.library.qmini_linear_i8
         i8 = np.ctypeslib.ndpointer(dtype=np.int8, flags="C_CONTIGUOUS")
         u8 = np.ctypeslib.ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS")
@@ -73,6 +75,46 @@ class NativeKernel:
         return output
 
 
+_NATIVE_KERNEL: NativeKernel | None = None
+_NATIVE_ATTEMPTED_PATH: Path | None = None
+
+
+def configured_library_path() -> Path:
+    override = os.environ.get("QMINI_NATIVE_LIBRARY")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().with_name("libqmini_kernel.so")
+
+
+def get_native_kernel() -> NativeKernel | None:
+    """Load the optional native CPU projection once; absence means PyTorch fallback."""
+    global _NATIVE_KERNEL, _NATIVE_ATTEMPTED_PATH
+    path = configured_library_path()
+    if _NATIVE_ATTEMPTED_PATH == path:
+        return _NATIVE_KERNEL
+    _NATIVE_ATTEMPTED_PATH = path
+    _NATIVE_KERNEL = None
+    if not path.is_file():
+        return None
+    try:
+        _NATIVE_KERNEL = NativeKernel(path)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Q-Mini native library exists but cannot be loaded: {path}: {exc}"
+        ) from exc
+    return _NATIVE_KERNEL
+
+
+def native_kernel_status() -> dict[str, str | bool]:
+    path = configured_library_path()
+    kernel = get_native_kernel()
+    return {
+        "available": kernel is not None,
+        "path": str(path),
+        "backend": "native-int8-quaternary" if kernel is not None else "pytorch-fallback",
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build the optional Q-Mini C++ projection primitive.")
     parser.add_argument("--build", action="store_true")
@@ -81,7 +123,7 @@ def main():
     if args.build:
         print(build_kernel(args.output))
     else:
-        parser.print_help()
+        print(native_kernel_status())
 
 
 if __name__ == "__main__":
