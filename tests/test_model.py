@@ -120,3 +120,12 @@ def test_non_integer_token_ids_are_rejected(tiny_config):
     model.eval()
     with torch.inference_mode(), pytest.raises(TypeError, match="integer tensor dtype"):
         model.forward_step(torch.tensor([1.0]))
+
+def test_thinking_steps_arguments_are_strict_in_all_inference_paths(tiny_config):
+    model = QMiniMoE(tiny_config).eval()
+    with pytest.raises(TypeError, match="thinking_steps must be an integer"):
+        model(torch.tensor([[1, 2]]), thinking_steps=1.5)
+    with pytest.raises(TypeError, match="thinking_steps must be an integer"):
+        model.new_stream_state(batch_size=1, thinking_steps="1")
+    with torch.inference_mode(), pytest.raises(TypeError, match="thinking_steps must be an integer"):
+        model.forward_step(torch.tensor([1]), thinking_steps=True)
