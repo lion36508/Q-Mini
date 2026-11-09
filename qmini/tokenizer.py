@@ -39,8 +39,11 @@ def train_tokenizer(
         )
     if min_frequency < 1:
         raise ValueError("min_frequency must be a positive integer.")
-    if not 0.0 <= validation_fraction < 0.5:
-        raise ValueError("validation_fraction must be in [0, 0.5).")
+    if not 0.0 < validation_fraction < 0.5:
+        raise ValueError(
+            "validation_fraction must be greater than 0 and below 0.5; "
+            "tokenizer fitting must exclude a non-empty validation holdout."
+        )
     paths = expand_data_paths(data_paths)
     if not paths:
         raise FileNotFoundError("No supported dataset files were found.")
