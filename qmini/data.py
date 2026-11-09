@@ -701,6 +701,28 @@ def prepare_token_streams(
 
     tokenizer_path_obj = Path(tokenizer_path)
     tokenizer = load_tokenizer(tokenizer_path_obj)
+    tokenizer_sidecar = Path(str(tokenizer_path_obj) + ".qmini.json")
+    if tokenizer_sidecar.is_file():
+        try:
+            sidecar = json.loads(tokenizer_sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Could not read tokenizer split manifest: {tokenizer_sidecar}"
+            ) from exc
+        if sidecar.get("format") != "qmini-tokenizer-manifest-v1":
+            raise ValueError("Unsupported tokenizer split manifest format.")
+        if sidecar.get("validation_fraction") != float(valid_fraction):
+            raise ValueError(
+                "Tokenizer and prepared dataset use different validation fractions. "
+                "Rebuild them with the same --valid-fraction."
+            )
+        if sidecar.get("near_duplicate_hamming_distance") != near_duplicate_distance:
+            raise ValueError(
+                "Tokenizer and prepared dataset use different near-duplicate thresholds. "
+                "Rebuild them with the same --near-duplicate-hamming-distance."
+            )
+        if sidecar.get("tokenizer_sha256") != _sha256_file(tokenizer_path_obj):
+            raise ValueError("Tokenizer file does not match its Q-Mini split manifest.")
     bos_id = special_token_id(tokenizer, "<bos>")
     eos_id = special_token_id(tokenizer, "<eos>")
     vocab_size = tokenizer.get_vocab_size()
