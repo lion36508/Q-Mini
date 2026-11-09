@@ -43,6 +43,7 @@ def main() -> int:
             "fp32_weight_bytes": cfg.estimated_parameter_count() * 4,
             "fp32_adamw_state_lower_bound_bytes": cfg.estimated_adamw_training_state_bytes(),
             "dense_reference_tokens_at_20_per_parameter": cfg.reference_tokens_at_20_per_parameter(),
+            "active_top1_reference_tokens_at_20_per_active_parameter": cfg.reference_tokens_at_20_per_active_parameter(),
             "max_context": cfg.max_context,
             "convolution_receptive_field": cfg.main_receptive_field(),
             "state_space_enabled": cfg.use_state_space,
