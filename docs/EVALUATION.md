@@ -98,3 +98,38 @@ Run \`python scripts/quantization_ablation.py --model-dir /path/to/final_model -
 
 This script measures reconstruction error only. It does not measure model NLL, assistant capability, latency or peak RAM, and it does not change the default Q2 exporter. Those quality/runtime ablations require the same Q-Mini-trained checkpoint and a fixed held-out evaluation set.
 
+
+
+
+## Multi-turn conversation evaluation
+
+Use \`eval-conversations\` with a JSONL file containing one conversation per line. Each record has an optional \`id\`, \`language\`, \`category\`, \`system\` prompt, and a non-empty \`turns\` array. Every turn contains \`user\`, \`reference\` (or \`expected\`/\`answer\`), and optional \`scorer\`, \`tolerance\`, \`language\` and \`category\`.
+
+Example:
+
+\`\`\`json
+{
+  "id": "continuity-001",
+  "language": "en",
+  "category": "multi_turn_continuity",
+  "system": "Answer accurately and concisely.",
+  "turns": [
+    {"user": "What is six times seven?", "reference": "42", "scorer": "numeric"},
+    {"user": "Repeat the number you just gave.", "reference": "42", "scorer": "numeric"}
+  ]
+}
+\`\`\`
+
+Run:
+
+\`\`\`bash
+python -m qmini.cli eval-conversations \\
+  --model-dir /path/to/final_model \\
+  --dataset evaluation/conversations.jsonl \\
+  --max-new-tokens 128 \\
+  --output reports/conversation-evaluation.json
+\`\`\`
+
+Generated assistant replies are fed back into the prompt for the next turn. The evaluator preserves system/role/end markers and removes only complete oldest turns when the prompt reaches \`max_context\`. If the current user turn cannot fit by itself, evaluation fails explicitly rather than silently truncating it. The report contains per-turn predictions, task-specific pass rate, Wilson intervals, per-category/per-language results and the history-token count before each turn.
+
+The benchmark set must remain held out from tokenizer fitting, pretraining and SFT. Use numeric/JSON scorers for objectively structured answers where possible; lexical exact match and token F1 remain diagnostics. Human review and externally checked answers are still needed for open-ended factuality, science, reasoning and code behavior.
