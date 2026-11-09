@@ -91,7 +91,9 @@ def pack_quaternary(weight: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
     if not np.isfinite(values).all():
         raise ValueError("Q2 packing rejects non-finite weights.")
     scales = (2.0 * np.mean(np.abs(values), axis=1)).astype(np.float32)
-    safe_scales = np.where(scales > 0.0, scales, 1.0)
+    # Match the QAT quantizer's clamp_min(1e-8) decision threshold,
+    # while retaining the exact (possibly zero) scale in the packed artifact.
+    safe_scales = np.maximum(scales, 1e-8)
     magnitude = np.where(
         np.abs(values) / safe_scales[:, None] >= 0.75, 1.0, 0.5
     )
