@@ -53,6 +53,8 @@ def main() -> int:
             "estimated_q2_fp16_export_bytes": cfg.estimated_packed_export_bytes(),
             "estimated_q2_fp16_export_gb_decimal": cfg.estimated_packed_export_bytes() / 1_000_000_000,
             "estimated_q2_fp16_export_gib": cfg.estimated_packed_export_bytes() / (1024 ** 3),
+            "estimated_streaming_state_bytes_batch1": cfg.estimated_streaming_state_bytes(batch_size=1),
+            "estimated_cpu_inference_working_set_bytes_batch1": cfg.estimated_cpu_inference_working_set_bytes(batch_size=1),
             "deployment_weight_budget_bytes": 1_500_000_000,
             "within_1_5gb_weight_artifact_budget": (
                 cfg.estimated_packed_export_bytes() <= 1_500_000_000
@@ -71,7 +73,10 @@ def main() -> int:
                 "guarantee; tokenizer and application files are separate. Two-bit quantization can reduce "
                 "accuracy and must be checked against held-out benchmarks. 20 tokens per parameter is a "
                 "dense-LM planning heuristic, not a validated sparse-MoE scaling law. Training memory "
-                "excludes activations, workspaces, fragmentation and distributed communication."
+                "excludes activations, workspaces, fragmentation and distributed communication. "
+                "CPU inference working-set estimates exclude Python/PyTorch baseline RSS, allocator "
+                "fragmentation, OS memory, tokenizer storage and transient archive-decompression overlap; "
+                "they are not real-device measurements."
             ),
         }
         print(json.dumps(report, indent=2))
