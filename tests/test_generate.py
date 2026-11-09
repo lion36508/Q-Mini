@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from qmini.generate import generate, load_model, trim_chat_history
@@ -53,10 +54,13 @@ def test_trim_chat_history_preserves_complete_control_token_turns():
         "<|user|>new question<|end|>\n<|assistant|>new reply<|end|>\n",
     ]
     history = "".join(turns)
+    expected = "".join(turns[-2:])
+    budget = len(counter.encode(expected).ids)
+    assert len(counter.encode(history).ids) > budget
     trimmed = trim_chat_history(
-        history, counter, token_budget=12, has_control_tokens=True
+        history, counter, token_budget=budget, has_control_tokens=True
     )
-    assert trimmed == "".join(turns[-2:])
+    assert trimmed == expected
     assert trimmed.startswith("<|user|>")
     assert trimmed.count("<|user|>") == 2
     assert trimmed.count("<|assistant|>") == 2
@@ -70,10 +74,14 @@ def test_trim_chat_history_preserves_legacy_role_boundaries():
         "[USER]\nmiddle question\n[ASSISTANT]\nmiddle reply\n",
         "[USER]\nnew question\n[ASSISTANT]\nnew reply\n",
     ]
+    history = "".join(turns)
+    expected = "".join(turns[-2:])
+    budget = len(counter.encode(expected).ids)
+    assert len(counter.encode(history).ids) > budget
     trimmed = trim_chat_history(
-        "".join(turns), counter, token_budget=12, has_control_tokens=False
+        history, counter, token_budget=budget, has_control_tokens=False
     )
-    assert trimmed == "".join(turns[-2:])
+    assert trimmed == expected
     assert trimmed.count("[USER]") == 2
     assert trimmed.count("[ASSISTANT]") == 2
 
