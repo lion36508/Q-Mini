@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qmini"
 version = "0.1.0"
-description = "From-scratch quaternary causal-convolution sparse-MoE language model"
+description = "From-scratch two-bit Q2-v2 causal-convolution sparse-MoE language model"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "torch>=2.10.0", "tokenizers>=0.15"]
@@ -18,7 +18,7 @@ colab = ["pyarrow>=15.0"]
 qmini = "qmini.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["qmini*"]
+include = ["qmini*", "scripts*"]
 
 [tool.setuptools.package-data]
 qmini = ["native_kernel.cpp"]
