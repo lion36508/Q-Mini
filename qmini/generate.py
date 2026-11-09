@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 
 import torch
@@ -190,6 +191,103 @@ def generate(
     return tokenizer.decode(generated, skip_special_tokens=True)
 
 
+_CONTROL_CHAT_ROLE = re.compile(r"<\|(system|user|assistant|tool|other)\|>")
+_LEGACY_CHAT_ROLE = re.compile(r"(?m)^\[(USER|ASSISTANT)\]\n")
+
+
+def _complete_chat_turns(
+    history: str,
+    has_control_tokens: bool,
+) -> tuple[list[str], list[str]]:
+    """Return immutable system prefix messages and complete user/assistant turns."""
+    if has_control_tokens:
+        marker_pattern = _CONTROL_CHAT_ROLE
+        end_marker = "<|end|>"
+    else:
+        marker_pattern = _LEGACY_CHAT_ROLE
+        end_marker = None
+
+    matches = list(marker_pattern.finditer(history))
+    if not matches:
+        if history.strip():
+            raise ValueError("Chat history has text outside recognized role markers.")
+        return [], []
+
+    if history[:matches[0].start()].strip():
+        raise ValueError("Chat history has an unlabelled prefix; refusing unsafe trimming.")
+
+    messages: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        role = match.group(1).lower()
+        if not has_control_tokens:
+            role = role.lower()
+        body_start = match.end()
+        if end_marker is not None:
+            end = history.find(end_marker, body_start)
+            if end < 0:
+                # An unfinished final message is deliberately discarded.
+                break
+            message_end = end + len(end_marker)
+        else:
+            message_end = (
+                matches[index + 1].start()
+                if index + 1 < len(matches) else len(history)
+            )
+        messages.append((role, history[match.start():message_end]))
+
+    system_prefix: list[str] = []
+    turns: list[str] = []
+    current: list[tuple[str, str]] = []
+    for role, message in messages:
+        if role == "user":
+            if current and any(item_role == "assistant" for item_role, _ in current):
+                turns.append("".join(item for _, item in current))
+            current = [("user", message)]
+        elif role == "system" and not current:
+            system_prefix.append(message)
+        elif current:
+            current.append((role, message))
+
+    if current and any(item_role == "assistant" for item_role, _ in current):
+        turns.append("".join(item for _, item in current))
+    return system_prefix, turns
+
+
+def trim_chat_history(
+    history: str,
+    tokenizer,
+    token_budget: int,
+    has_control_tokens: bool = True,
+) -> str:
+    """Trim only whole, completed conversation turns from the oldest side.
+
+    A turn is one user message plus its following tool/assistant messages.
+    Role markers and end markers are preserved verbatim. If the newest
+    complete turn alone exceeds the budget, fail rather than corrupt structure.
+    """
+    if token_budget < 1:
+        raise ValueError("token_budget must be positive.")
+    system_prefix, turns = _complete_chat_turns(history, has_control_tokens)
+    if not turns:
+        raise ValueError("No complete user/assistant turn is available to retain.")
+
+    prefix = "".join(system_prefix)
+    kept: list[str] = []
+    for turn in reversed(turns):
+        candidate_turns = [turn, *kept]
+        candidate = prefix + "".join(candidate_turns)
+        if len(tokenizer.encode(candidate).ids) > token_budget:
+            break
+        kept = candidate_turns
+
+    if not kept:
+        raise ValueError(
+            "The newest complete conversation turn exceeds the safe history budget. "
+            "Start a new chat or reduce the message length; role markers were not removed."
+        )
+    return prefix + "".join(kept)
+
+
 def interactive_chat(
     model_dir: str | Path,
     max_new_tokens: int = 160,
@@ -303,4 +401,14 @@ def interactive_chat(
             history += answer + "\n"
         ids = tokenizer.encode(history).ids
         if len(ids) > model.config.max_context * 3 // 4:
-            history = tokenizer.decode(ids[-model.config.max_context // 2:])
+            try:
+                history = trim_chat_history(
+                    history,
+                    tokenizer,
+                    token_budget=max(1, model.config.max_context // 2),
+                    has_control_tokens=has_control_tokens,
+                )
+            except ValueError as exc:
+                print(f"Cannot safely trim conversation history: {exc}")
+                print("Start a new chat to continue without losing role boundaries.")
+                return
