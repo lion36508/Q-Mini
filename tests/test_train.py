@@ -319,9 +319,12 @@ def test_finetuning_initializes_weights_and_resumes_with_same_source(tmp_path, t
 def test_periodic_validation_loss_is_weighted_by_supervised_tokens(monkeypatch):
     import qmini.train as train_module
 
+    from types import SimpleNamespace
+
     class DummyModel:
         def __init__(self):
             self.training = True
+            self.config = SimpleNamespace(thinking_steps=1)
             self.logits_by_marker = {
                 0: torch.tensor([[[2.0, 0.0]] * 4]),
                 1: torch.tensor([[[0.0, 2.0]] * 4]),
@@ -393,8 +396,11 @@ def test_periodic_validation_loss_is_weighted_by_supervised_tokens(monkeypatch):
 def test_periodic_validation_uses_all_tokens_for_plain_text(monkeypatch):
     import qmini.train as train_module
 
+    from types import SimpleNamespace
+
     class FixedModel:
         training = False
+        config = SimpleNamespace(thinking_steps=1)
 
         def eval(self):
             return self
