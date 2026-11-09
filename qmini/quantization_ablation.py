@@ -161,8 +161,15 @@ def run_ablation(
             raise ValueError("Final model manifest parameter count does not match config.json.")
         packed_name = manifest.get("packed_export")
         packed_bytes = manifest.get("packed_export_bytes")
-        if not isinstance(packed_name, str) or not packed_name:
-            raise ValueError("Final model manifest does not identify its packed Q2 export.")
+        if (
+            not isinstance(packed_name, str)
+            or not packed_name
+            or Path(packed_name).name != packed_name
+            or not packed_name.endswith(".npz")
+        ):
+            raise ValueError(
+                "Final model manifest must identify a local .npz packed Q2 export."
+            )
         packed_path = config_path.parent / packed_name
         if not packed_path.is_file() or packed_path.stat().st_size != packed_bytes:
             raise ValueError("Final model manifest packed-export size/path fingerprint is invalid.")
