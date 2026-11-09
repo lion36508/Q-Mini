@@ -63,3 +63,52 @@ def test_tokenizer_cli_rejects_zero_validation_fraction_at_public_boundary(
     )
     with pytest.raises(ValueError, match="greater than 0 and below 0.5"):
         main()
+
+
+def test_eval_conversations_cli_routes_through_structured_evaluator(
+    tmp_path, monkeypatch
+):
+    import sys
+    from types import SimpleNamespace
+
+    import qmini.cli as cli
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(max_thinking_steps=3),
+    )
+    tokenizer = object()
+    expected_report = {"format": "qmini-conversation-evaluation-v1"}
+    called = {}
+
+    monkeypatch.setattr(
+        cli, "load_model", lambda model_dir, device=None: (
+            model, tokenizer, "cpu"
+        )
+    )
+
+    def fake_evaluate(*args):
+        called["args"] = args
+        return expected_report
+
+    monkeypatch.setattr(cli, "evaluate_conversation_file", fake_evaluate)
+    monkeypatch.setattr(
+        cli, "emit_report",
+        lambda report, output: called.update({"report": report, "output": output}),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qmini", "eval-conversations",
+            "--model-dir", str(tmp_path / "model"),
+            "--dataset", str(tmp_path / "conversations.jsonl"),
+            "--thinking-steps", "3",
+            "--output", str(tmp_path / "report.json"),
+        ],
+    )
+    assert cli.main() == 0
+    assert called["args"][0] is model
+    assert called["args"][1] is tokenizer
+    assert called["args"][2] == str(tmp_path / "conversations.jsonl")
+    assert called["report"] is expected_report
+    assert called["output"] == str(tmp_path / "report.json")
