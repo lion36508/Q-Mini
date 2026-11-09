@@ -538,7 +538,7 @@ def evaluate_conversation_file(
     has_control_tokens = all(
         tokenizer.token_to_id(token) is not None for token in required_tokens
     )
-    from .generate import trim_chat_history
+    from .generate import _complete_chat_turns, trim_chat_history
 
     was_training = model.training
     model.eval()
@@ -587,18 +587,16 @@ def evaluate_conversation_file(
                                 f"Conversation {conversation['id']} turn {turn_index} "
                                 "exceeds max_context by itself."
                             )
-                        reserved_for_turn = len(tokenizer.encode(user_block).ids)
-                        history_budget = model.config.max_context - reserved_for_turn
-                        if history_budget < 1:
-                            raise ValueError(
-                                f"Conversation {conversation['id']} turn {turn_index} "
-                                "cannot fit within max_context."
-                            )
+                        _system_before, previous_turns = _complete_chat_turns(
+                            history, has_control_tokens
+                        )
                         history = trim_chat_history(
                             history,
                             tokenizer,
-                            token_budget=history_budget,
+                            token_budget=model.config.max_context,
                             has_control_tokens=has_control_tokens,
+                            token_suffix=user_block,
+                            allow_empty=True,
                         )
                         prompt = history + user_block
                         if len(tokenizer.encode(prompt).ids) > model.config.max_context:
@@ -606,6 +604,13 @@ def evaluate_conversation_file(
                                 f"Conversation {conversation['id']} turn {turn_index} "
                                 "still exceeds max_context after whole-turn trimming."
                             )
+
+                    _system_after, retained_turns = _complete_chat_turns(
+                        history, has_control_tokens
+                    )
+                    dropped_history_turns = max(
+                        0, len(previous_turns) - len(retained_turns)
+                    ) if len(tokenizer.encode(prompt).ids) <= model.config.max_context else 0
 
                     prediction = generate(
                         model,
@@ -655,6 +660,8 @@ def evaluate_conversation_file(
                         "exact_match": bool(lexical_exact),
                         "token_f1": float(lexical_f1),
                         "history_tokens_before_turn": len(tokenizer.encode(history).ids),
+                        "history_turns_retained_before_turn": len(retained_turns),
+                        "history_turns_dropped_before_turn": dropped_history_turns,
                     })
 
                     if has_control_tokens:
