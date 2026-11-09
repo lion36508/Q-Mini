@@ -377,3 +377,28 @@ def test_prepare_rejects_tokenizer_and_dataset_split_mismatch(tmp_path):
             [corpus], tokenizer_path, tmp_path / "mismatched-output",
             valid_fraction=0.1, loss_mask_mode="all", near_duplicate_distance=1,
         )
+
+
+def test_large_json_array_trailing_whitespace_is_consumed_in_bounded_chunks(tmp_path):
+    import io
+    from qmini.data import _iter_json_array
+
+    class TrackingReader(io.StringIO):
+        def __init__(self, value):
+            super().__init__(value)
+            self.read_sizes = []
+
+        def read(self, size=-1):
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    reader = TrackingReader('[{"value": 1}]' + (" " * 100_000))
+    parsed = list(_iter_json_array(reader, tmp_path / "large.json", chunk_chars=256))
+    assert parsed == [{"value": 1}]
+    assert reader.read_sizes
+    assert all(0 < size <= 256 for size in reader.read_sizes)
+
+    invalid = TrackingReader('[{"value": 1}]' + (" " * 200) + "unexpected")
+    with pytest.raises(ValueError, match="Unexpected data after JSON array"):
+        list(_iter_json_array(invalid, tmp_path / "invalid.json", chunk_chars=64))
+    assert all(0 < size <= 64 for size in invalid.read_sizes)
