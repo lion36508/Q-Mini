@@ -23,3 +23,17 @@ def test_unknown_config_keys_fail_loudly():
 def test_dilation_count_must_match_layers():
     with pytest.raises(ValueError, match="dilations"):
         QMiniConfig.from_dict({"n_layers": 3, "dilations": [1, 2]})
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"d_model": 32.5},
+        {"dilations": [1.5, 2, 4, 8, 16, 32]},
+        {"rms_norm_eps": float("nan")},
+        {"seed": -1},
+        {"max_context": 1},
+    ],
+)
+def test_invalid_config_values_are_rejected_without_coercion(values):
+    with pytest.raises((TypeError, ValueError)):
+        QMiniConfig.from_dict(values)
