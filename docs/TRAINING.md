@@ -85,3 +85,9 @@ When a prepared assistant-only mask contains very few positive target tokens, th
 
 
 Final model manifests now bind the dense model.pt snapshot and packed model.qmini.npz export with independent SHA-256 fingerprints and byte counts. Quantization ablations reject a dense reference whose manifest, config, parameter count, packed artifact size or hashes do not match. This is separate from the resumable latest.pt checkpoint contract.
+
+
+
+## Hypothetical distributed memory planning (not a distributed trainer)
+
+The resource planner accepts --world-size N --sharding-scenario fsdp-full-shard or --sharding-scenario zero3 to divide the FP32 parameter/gradient/AdamW-state lower bound by a hypothetical number of ranks. The output explicitly reports distributed_training_implemented: false. This is an idealized arithmetic lower bound, not an FSDP/ZeRO measurement: it excludes all-gather/reshard peaks, activation memory, optimizer implementation details, communication buffers, fragmentation, rank imbalance and data-loader state. The current trainer still runs on one device. Do not use the planner's per-rank number as evidence that a multi-GPU 5B run is supported.
