@@ -1,9 +1,10 @@
+import json
 import numpy as np
 import pytest
 import torch
 
 from qmini.export import verify_packed_export
-from qmini.train import _masked_cross_entropy, train_model
+from qmini.train import _masked_cross_entropy, _masked_cross_entropy_sum, train_model
 from qmini.data import prepare_token_streams
 from qmini.tokenizer import train_tokenizer
 
@@ -239,3 +240,59 @@ def test_training_rejects_modified_prepared_token_stream(tiny_config, tmp_path):
             train_mask_bin=token_dir / "train.mask.bin",
             valid_mask_bin=token_dir / "valid.mask.bin",
         )
+
+def test_masked_cross_entropy_uses_token_weight_across_microbatches():
+    first_logits = torch.tensor([[[2.0, 0.0], [0.0, 2.0]]])
+    first_targets = torch.tensor([[0, 1]])
+    first_mask = torch.tensor([[1.0, 0.0]])
+    second_logits = torch.tensor([[[0.0, 2.0], [2.0, 0.0], [0.0, 2.0]]])
+    second_targets = torch.tensor([[1, 0, 1]])
+    second_mask = torch.tensor([[1.0, 1.0, 1.0]])
+
+    first_sum, first_count = _masked_cross_entropy_sum(
+        first_logits, first_targets, first_mask
+    )
+    second_sum, second_count = _masked_cross_entropy_sum(
+        second_logits, second_targets, second_mask
+    )
+    weighted = (first_sum + second_sum) / (first_count + second_count)
+    expected = (
+        _masked_cross_entropy(first_logits, first_targets, first_mask)
+        + 3 * _masked_cross_entropy(second_logits, second_targets, second_mask)
+    ) / 4
+    assert torch.allclose(weighted, expected)
+
+
+def test_finetuning_initializes_weights_and_resumes_with_same_source(tmp_path, tiny_config):
+    train_bin = tmp_path / "train.bin"
+    valid_bin = tmp_path / "valid.bin"
+    _write_stream(train_bin, tiny_config.vocab_size, 256, 501)
+    _write_stream(valid_bin, tiny_config.vocab_size, 256, 502)
+
+    pretrained_dir = train_model(
+        tiny_config, train_bin, valid_bin, tmp_path / "pretrain",
+        steps=1, batch_size=1, seq_len=8, grad_accum=1,
+        eval_every=1, save_every=1, eval_batches=1,
+    )
+    initial_weights = pretrained_dir / "model.pt"
+    sft_run = tmp_path / "sft"
+    train_model(
+        tiny_config, train_bin, valid_bin, sft_run,
+        steps=1, batch_size=1, seq_len=8, grad_accum=1,
+        eval_every=1, save_every=1, eval_batches=1,
+        init_from=initial_weights,
+    )
+    manifest = json.loads((sft_run / "run.json").read_text(encoding="utf-8"))
+    assert manifest["initial_model"]["sha256"]
+
+    train_model(
+        tiny_config, train_bin, valid_bin, sft_run,
+        steps=2, batch_size=1, seq_len=8, grad_accum=1,
+        eval_every=1, save_every=1, eval_batches=1,
+        resume=True, extend_schedule=True,
+    )
+    checkpoint = torch.load(
+        sft_run / "latest.pt", map_location="cpu", weights_only=False
+    )
+    assert checkpoint["step"] == 2
+    assert checkpoint["resume_contract"]["initial_model"]["sha256"]
