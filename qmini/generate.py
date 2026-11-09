@@ -307,7 +307,7 @@ def prepare_chat_prompt(
     history_budget = max_context - reserved_tokens
     if history_budget < 1:
         raise ValueError(
-            "The current user message and saved context exceed max_context by themselves. "
+            "The current user message exceeds max_context when combined with saved context. "
             "Shorten this message or remove some saved notes."
         )
     if not history:
