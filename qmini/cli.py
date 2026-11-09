@@ -7,6 +7,14 @@ from .generate import generate, interactive_chat, load_model
 from .evaluate import emit_report, evaluate_language_model, evaluate_task_file
 from .model import QMiniMoE
 
+
+def _validate_thinking_steps(value: int | None, max_steps: int) -> None:
+    if value is not None and not 1 <= value <= max_steps:
+        raise ValueError(
+            f"--thinking-steps must be 1..{max_steps} for this model configuration."
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="qmini", description="Q-Mini model, dataset and training pipeline")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -141,11 +149,10 @@ def main() -> int:
     gen.add_argument("--thinking-steps", type=int); gen.add_argument("--device", default=None)
     def do_generate(a):
         model, tokenizer, _ = load_model(a.model_dir, a.device)
-        if a.thinking_steps is not None and not 1 <= a.thinking_steps <= model.config.max_thinking_steps:
-            raise SystemExit(
-                f"--thinking-steps must be 1..{model.config.max_thinking_steps} "
-                "for this model configuration."
-            )
+        try:
+            _validate_thinking_steps(a.thinking_steps, model.config.max_thinking_steps)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         print(generate(model, tokenizer, a.prompt, a.max_new_tokens, a.temperature, a.top_k, a.top_p, a.thinking_steps)); return 0
     gen.set_defaults(func=do_generate)
     verify_export = commands.add_parser("verify-export", help="validate a packed Q-Mini NPZ export")
@@ -236,11 +243,10 @@ def main() -> int:
     eval_tasks.add_argument("--output", default=None)
     def do_eval_tasks(a):
         model, tokenizer, _device = load_model(a.model_dir, a.device)
-        if a.thinking_steps is not None and not 1 <= a.thinking_steps <= model.config.max_thinking_steps:
-            raise SystemExit(
-                f"--thinking-steps must be 1..{model.config.max_thinking_steps} "
-                "for this model configuration."
-            )
+        try:
+            _validate_thinking_steps(a.thinking_steps, model.config.max_thinking_steps)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         report = evaluate_task_file(
             model, tokenizer, a.dataset, a.max_new_tokens, a.limit, a.thinking_steps
         )
