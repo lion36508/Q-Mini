@@ -272,7 +272,7 @@ No Transformer self-attention, Q/K/V projections or dot-product attention are in
 | Profile | Total parameters | Unique Top-1 active parameters/token | Purpose |
 |---|---:|---:|---|
 | `qmini_5m.json` | 5,245,996 | 3,070,636 | Small-scale development |
-| `qmini_research_134m.json` | 134,426,200 | 41M-class | Historical convolution-only baseline |
+| `qmini_research_134m.json` | 134,426,200 | 33,372,632 | Historical convolution-only baseline |
 | `qmini_research_152m.json` | 152,483,800 | 51,430,232 | Hybrid GPU research profile |
 | `qmini_5b.json` | 5,132,630,288 | 852,873,488 | Capacity design, not currently distributed-training-ready |
 
