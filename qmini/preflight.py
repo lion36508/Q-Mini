@@ -51,6 +51,24 @@ def available_memory_info(device: torch.device) -> dict[str, Any]:
     }
 
 
+def training_memory_floor_bytes(
+    config: QMiniConfig,
+    safety_factor: float = DEFAULT_TRAINING_MEMORY_SAFETY_FACTOR,
+) -> int:
+    """Return a conservative free-memory floor from the FP32 AdamW state lower bound."""
+    config.validate()
+    if (
+        isinstance(safety_factor, bool)
+        or not isinstance(safety_factor, (int, float))
+        or not math.isfinite(float(safety_factor))
+        or safety_factor < 1.0
+    ):
+        raise ValueError("safety_factor must be a finite number >= 1.")
+    return math.ceil(
+        config.estimated_adamw_training_state_bytes() * float(safety_factor)
+    )
+
+
 def check_training_memory_budget(
     config: QMiniConfig,
     device: torch.device,
@@ -72,7 +90,7 @@ def check_training_memory_budget(
         raise ValueError("safety_factor must be a finite number >= 1.")
 
     state_floor = config.estimated_adamw_training_state_bytes()
-    required = math.ceil(state_floor * float(safety_factor))
+    required = training_memory_floor_bytes(config, safety_factor)
     measured = available_memory_info(device)
     available = measured["available_bytes"]
     report = {
