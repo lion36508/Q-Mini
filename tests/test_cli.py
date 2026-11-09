@@ -174,3 +174,22 @@ def test_distributed_plan_rejects_ambiguous_world_size_and_invalid_rank_count(
     )
     with pytest.raises(SystemExit, match="world-size must be positive"):
         cli.main()
+
+def test_training_cli_requires_an_explicit_total_step_target(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qmini", "train",
+            "--config", "configs/qmini_smoke.json",
+            "--train-bin", "train.bin",
+            "--valid-bin", "valid.bin",
+            "--tokenizer", "tokenizer.json",
+            "--output-dir", "run",
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2

@@ -342,7 +342,7 @@ The default \`--near-duplicate-hamming-distance 0\` keeps exact-deduplication be
 
 ## Colab training and SFT stages
 
-The notebook now defaults to a small, reproducible learning-proof run: fixed-seed held-out NLL is measured before and after training. The 152M long run requires explicit \`RUN_LONG_TRAINING = True\` opt-in and is step-capped. Optional assistant SFT is also disabled by default; when enabled, it uses a separate licensed dataset, response-only masks, a tokenizer-bound Q-Mini checkpoint and fresh optimizer state. The notebook never downloads pretrained weights. A small learning-proof or smoke run is not evidence of general assistant quality.
+The notebook now defaults to a small, reproducible learning-proof run: fixed-seed held-out NLL is measured before and after training. The 152M long run requires explicit \`RUN_LONG_TRAINING = True\` opt-in and has no arbitrary 2,000-step cap. Set LONG_OPTIMIZER_STEPS_OVERRIDE to choose the total optimizer-step target, or leave it None to use the documented token-budget heuristic. Increasing the target reuses the same Drive checkpoint and extends the saved learning-rate schedule. Optional assistant SFT is also disabled by default; when enabled, it uses a separate licensed dataset, response-only masks, a tokenizer-bound Q-Mini checkpoint and fresh optimizer state. The notebook never downloads pretrained weights. A small learning-proof or smoke run is not evidence of general assistant quality.
 
 ## Experimental quantization ablation
 

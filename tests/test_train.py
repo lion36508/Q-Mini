@@ -37,6 +37,18 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
     _write_stream(valid_bin, tiny_config.vocab_size, 192, 2027)
     run = tmp_path / "run"
 
+    from qmini.model import QMiniMoE
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(tiny_config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(tiny_config.seed)
+    initial_model = QMiniMoE(tiny_config).to(device)
+    initial_state = {
+        name: value.detach().cpu().clone()
+        for name, value in initial_model.state_dict().items()
+    }
+    del initial_model
+
     final = train_model(
         tiny_config, train_bin, valid_bin, run,
         steps=2, batch_size=1, seq_len=8, grad_accum=1,
@@ -45,6 +57,15 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
     checkpoint = torch.load(run / "latest.pt", map_location="cpu", weights_only=False)
     assert checkpoint["step"] == 2
     assert checkpoint["format"] == "qmini-checkpoint-v2"
+    assert any(
+        not torch.equal(initial_state[name], value.detach().cpu())
+        for name, value in checkpoint["model"].items()
+        if value.is_floating_point()
+    ), "Training completed without changing any model parameter."
+    assert all(
+        not value.is_floating_point() or bool(torch.isfinite(value).all())
+        for value in checkpoint["model"].values()
+    ), "Training produced non-finite model parameters."
     assert checkpoint["resume_contract"]["train"]["sha256"]
     assert checkpoint["tokens_seen"] == 16
     assert sum(checkpoint["thinking_step_counts"].values()) == 2

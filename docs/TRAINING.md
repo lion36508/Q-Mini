@@ -63,7 +63,7 @@ For assistant-only datasets, context tokens do not contribute to the numerator o
 
 ## Colab learning proof and optional own-checkpoint SFT
 
-\`colab/QMini_Training.ipynb\` now defaults to a **50-step small-model smoke run**. It measures held-out token-weighted NLL on a fixed evaluation seed before and after training and records a \`learning_proof_*.json\` file in Drive. A long 152M research run is disabled until the user explicitly sets \`RUN_LONG_TRAINING = True\`; it is capped by \`LONG_MAX_OPTIMIZER_STEPS\`, reports the actual token budget/corpus passes and resumes from a hash-keyed Drive checkpoint. The 5B configuration is not a Colab training target.
+\`colab/QMini_Training.ipynb\` now defaults to a **50-step small-model smoke run**. It measures held-out token-weighted NLL on a fixed evaluation seed before and after training and records a \`learning_proof_*.json\` file in Drive. A long 152M research run is disabled until the user explicitly sets \`RUN_LONG_TRAINING = True\`; it has no arbitrary maximum optimizer-step cap. Set LONG_OPTIMIZER_STEPS_OVERRIDE to the total step target, or leave it None to use the documented token-budget heuristic. The target is the total optimizer-step count, not an extra count after resume. Increasing it reuses the same Drive run directory and checkpoint, then extends the saved cosine schedule. The step target is excluded from the run identity; source revision, implementation hash, data/tokenizer hashes, model config and optimizer settings remain part of the identity. The 5B configuration is not a Colab training target.
 
 The optional SFT stage is disabled by default (\`RUN_OWN_CHECKPOINT_SFT = False\`). Put a separate licensed chat/instruction corpus under \`MyDrive/QMini/artifacts/sft_datasets/\`, with rows containing \`messages\` or supported instruction/answer fields, then set the flag to \`True\`. The notebook:
 1. Uses the matching tokenizer/config from a Q-Mini-produced checkpoint.
@@ -91,3 +91,6 @@ Final model manifests now bind the dense model.pt snapshot and packed model.qmin
 ## Hypothetical distributed memory planning (not a distributed trainer)
 
 The resource planner accepts --world-size N --sharding-scenario fsdp-full-shard or --sharding-scenario zero3 to divide the FP32 parameter/gradient/AdamW-state lower bound by a hypothetical number of ranks. The output explicitly reports distributed_training_implemented: false. This is an idealized arithmetic lower bound, not an FSDP/ZeRO measurement: it excludes all-gather/reshard peaks, activation memory, optimizer implementation details, communication buffers, fragmentation, rank imbalance and data-loader state. The current trainer still runs on one device. Do not use the planner's per-rank number as evidence that a multi-GPU 5B run is supported.
+
+
+The CLI requires an explicit total optimizer-step target via --steps; it has no implicit 1,000-step default. For example, --steps 50000 means train until a total of 50,000 optimizer updates. Resume with --resume; when increasing the saved scheduler horizon, pass --extend-schedule. The Colab notebook performs that extension when its user-selected target is increased.

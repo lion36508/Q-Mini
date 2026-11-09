@@ -151,7 +151,7 @@ def main() -> int:
     ))
     train = commands.add_parser("train", help="train from scratch or resume a checkpoint")
     for flag in ("config", "train-bin", "valid-bin", "tokenizer", "output-dir"): train.add_argument("--" + flag, required=True)
-    train.add_argument("--steps", type=int, default=1000); train.add_argument("--batch-size", type=int, default=4)
+    train.add_argument("--steps", type=int, required=True, help="total optimizer-step target; increase it to continue a run after resume"); train.add_argument("--batch-size", type=int, default=4)
     train.add_argument("--seq-len", type=int, default=512); train.add_argument("--grad-accum", type=int, default=8)
     train.add_argument("--lr", type=float, default=3e-4); train.add_argument("--weight-decay", type=float, default=0.1)
     train.add_argument("--eval-every", type=int, default=250); train.add_argument("--save-every", type=int, default=250)
