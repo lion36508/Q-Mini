@@ -7,7 +7,7 @@ from .generate import generate, interactive_chat, load_model
 from .evaluate import emit_report, evaluate_language_model, evaluate_task_file
 from .model import QMiniMoE
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(prog="qmini", description="Q-Mini model, dataset and training pipeline")
     commands = parser.add_subparsers(dest="command", required=True)
     audit = commands.add_parser("audit", help="inspect model configuration and runtime")
@@ -187,6 +187,10 @@ def main():
         return 0
     eval_tasks.set_defaults(func=do_eval_tasks)
 
-    args = parser.parse_args(); result = args.func(args); raise SystemExit(result if isinstance(result, int) else 0)
+    args = parser.parse_args()
+    result = args.func(args)
+    return result if isinstance(result, int) else 0
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    raise SystemExit(main())
