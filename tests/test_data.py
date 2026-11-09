@@ -354,3 +354,26 @@ def test_near_duplicate_distance_validation_is_strict():
     for distance in (-1, 4, 1.5, True):
         with pytest.raises(ValueError, match="0 to 3"):
             _validate_near_duplicate_distance(distance)
+
+
+def test_prepare_rejects_tokenizer_and_dataset_split_mismatch(tmp_path):
+    corpus = tmp_path / "split-contract.jsonl"
+    rows = [
+        {"text": "An independent document about galaxies and stellar evolution."},
+        {"text": "A separate document about oceans and marine ecosystems."},
+        {"text": "A different document about materials and bridge construction."},
+    ]
+    corpus.write_text(
+        "\n".join(json.dumps(row) for row in rows), encoding="utf-8"
+    )
+    tokenizer_path = tmp_path / "split-contract-tokenizer.json"
+    train_tokenizer(
+        [corpus], tokenizer_path, vocab_size=320, min_frequency=1,
+        validation_fraction=0.1, near_duplicate_distance=2,
+    )
+
+    with pytest.raises(ValueError, match="near-duplicate thresholds"):
+        prepare_token_streams(
+            [corpus], tokenizer_path, tmp_path / "mismatched-output",
+            valid_fraction=0.1, loss_mask_mode="all", near_duplicate_distance=1,
+        )
