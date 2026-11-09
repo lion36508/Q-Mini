@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from qmini.export import verify_packed_export
-from qmini.train import _masked_cross_entropy, _masked_cross_entropy_sum, train_model
+from qmini.train import _evaluate, _masked_cross_entropy, _masked_cross_entropy_sum, train_model
 from qmini.data import prepare_token_streams
 from qmini.tokenizer import train_tokenizer
 
@@ -296,3 +296,121 @@ def test_finetuning_initializes_weights_and_resumes_with_same_source(tmp_path, t
     )
     assert checkpoint["step"] == 2
     assert checkpoint["resume_contract"]["initial_model"]["sha256"]
+
+
+def test_periodic_validation_loss_is_weighted_by_supervised_tokens(monkeypatch):
+    import qmini.train as train_module
+
+    class DummyModel:
+        def __init__(self):
+            self.training = True
+            self.logits_by_marker = {
+                0: torch.tensor([[[2.0, 0.0]] * 4]),
+                1: torch.tensor([[[0.0, 2.0]] * 4]),
+            }
+
+        def eval(self):
+            self.training = False
+            return self
+
+        def train(self, mode=True):
+            self.training = bool(mode)
+            return self
+
+        def __call__(self, input_ids):
+            marker = int(input_ids[0, 0].item())
+            return {"logits": self.logits_by_marker[marker]}
+
+    batches = iter([
+        (
+            torch.zeros((1, 4), dtype=torch.long),
+            torch.zeros((1, 4), dtype=torch.long),
+            torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        ),
+        (
+            torch.ones((1, 4), dtype=torch.long),
+            torch.zeros((1, 4), dtype=torch.long),
+            torch.ones((1, 4)),
+        ),
+    ])
+    monkeypatch.setattr(
+        train_module, "_sample_batch",
+        lambda *args, **kwargs: next(batches),
+    )
+    model = DummyModel()
+    report = _evaluate(
+        model,
+        np.zeros(32, dtype=np.uint16),
+        None,
+        batch_size=1,
+        seq_len=4,
+        batches=2,
+        device=torch.device("cpu"),
+        seed=123,
+    )
+
+    first_sum, first_count = _masked_cross_entropy_sum(
+        model.logits_by_marker[0],
+        torch.zeros((1, 4), dtype=torch.long),
+        torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+    )
+    second_sum, second_count = _masked_cross_entropy_sum(
+        model.logits_by_marker[1],
+        torch.zeros((1, 4), dtype=torch.long),
+        torch.ones((1, 4)),
+    )
+    expected = float(
+        ((first_sum + second_sum) / (first_count + second_count)).item()
+    )
+    unweighted_batch_mean = float(
+        (first_sum / first_count + second_sum / second_count).item() / 2.0
+    )
+
+    assert report["eval_loss"] == pytest.approx(expected, rel=1e-7)
+    assert report["eval_perplexity"] == pytest.approx(np.exp(expected), rel=1e-7)
+    assert abs(report["eval_loss"] - unweighted_batch_mean) > 0.5
+    assert model.training is True
+
+
+def test_periodic_validation_uses_all_tokens_for_plain_text(monkeypatch):
+    import qmini.train as train_module
+
+    class FixedModel:
+        training = False
+
+        def eval(self):
+            return self
+
+        def train(self, mode=True):
+            self.training = bool(mode)
+            return self
+
+        def __call__(self, input_ids):
+            return {"logits": torch.tensor([[[2.0, 0.0], [0.0, 2.0]]])}
+
+    monkeypatch.setattr(
+        train_module, "_sample_batch",
+        lambda *args, **kwargs: (
+            torch.zeros((1, 2), dtype=torch.long),
+            torch.tensor([[0, 1]], dtype=torch.long),
+            torch.ones((1, 2)),
+        ),
+    )
+    report = _evaluate(
+        FixedModel(),
+        np.zeros(16, dtype=np.uint16),
+        None,
+        batch_size=1,
+        seq_len=2,
+        batches=1,
+        device=torch.device("cpu"),
+        seed=456,
+    )
+    expected = float(
+        torch.nn.functional.cross_entropy(
+            torch.tensor([[[2.0, 0.0], [0.0, 2.0]]]).reshape(-1, 2),
+            torch.tensor([[0, 1]]).reshape(-1),
+            reduction="mean",
+        ).item()
+    )
+    assert report["eval_loss"] == pytest.approx(expected, rel=1e-7)
