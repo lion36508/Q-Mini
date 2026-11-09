@@ -52,13 +52,19 @@ def export_packed_state(
             specs.append({"name": name, "kind": "fp16", "shape": list(value.shape), "value_key": value_key})
 
     metadata = {
-        "format": "qmini-packed-v1",
+        "format": "qmini-packed-v2",
+        "q2_contract": {
+            "version": 2,
+            "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+            "row_scale": "2 * mean(abs(original_output_row))",
+            "all_zero_row_scale": 0.0,
+        },
         "config": config.to_dict(),
         "tensor_count": len(specs),
         "quaternary_tensor_count": sum(item["kind"] == "q2" for item in specs),
         "fp16_tensor_count": sum(item["kind"] == "fp16" for item in specs),
         "tensors": specs,
-        "quaternary_codes": {"00": -2, "01": -1, "10": 1, "11": 2},
+        "quaternary_codes": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
     }
     arrays["metadata_json"] = np.asarray(json.dumps(metadata, separators=(",", ":")))
     temporary = target.with_name(target.name + ".tmp")
@@ -76,8 +82,19 @@ def reconstruct_packed_state(path: str | Path) -> tuple[QMiniConfig, dict[str, n
     """Reconstruct dequantized FP32 arrays from a packed Q-Mini archive."""
     with np.load(Path(path), allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata_json"].item()))
-        if metadata.get("format") != "qmini-packed-v1":
+        archive_format = metadata.get("format")
+        if archive_format not in {"qmini-packed-v1", "qmini-packed-v2"}:
             raise ValueError("Unsupported Q-Mini packed export format.")
+        q2_version = 1 if archive_format == "qmini-packed-v1" else 2
+        if q2_version == 2:
+            expected_contract = {
+                "version": 2,
+                "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+                "row_scale": "2 * mean(abs(original_output_row))",
+                "all_zero_row_scale": 0.0,
+            }
+            if metadata.get("q2_contract") != expected_contract:
+                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         state: dict[str, np.ndarray] = {}
         for spec in metadata["tensors"]:
@@ -87,6 +104,7 @@ def reconstruct_packed_state(path: str | Path) -> tuple[QMiniConfig, dict[str, n
                     archive[spec["packed_key"]],
                     archive[spec["scale_key"]],
                     int(spec["in_features"]),
+                    format_version=q2_version,
                 ).reshape(shape)
             elif spec["kind"] == "fp16":
                 value = np.asarray(archive[spec["value_key"]], dtype=np.float32).reshape(shape)
@@ -114,8 +132,19 @@ def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
         if "metadata_json" not in archive:
             raise ValueError("Packed archive is missing metadata_json.")
         metadata = json.loads(str(archive["metadata_json"].item()))
-        if metadata.get("format") != "qmini-packed-v1":
+        archive_format = metadata.get("format")
+        if archive_format not in {"qmini-packed-v1", "qmini-packed-v2"}:
             raise ValueError("Unsupported Q-Mini packed export format.")
+        q2_version = 1 if archive_format == "qmini-packed-v1" else 2
+        if q2_version == 2:
+            expected_contract = {
+                "version": 2,
+                "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+                "row_scale": "2 * mean(abs(original_output_row))",
+                "all_zero_row_scale": 0.0,
+            }
+            if metadata.get("q2_contract") != expected_contract:
+                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         specs = metadata.get("tensors")
         if not isinstance(specs, list) or len(specs) != int(metadata.get("tensor_count", -1)):
@@ -146,7 +175,9 @@ def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
                     raise ValueError(f"Invalid packed Q2 payload for {name}.")
                 if scales.dtype != np.float32 or scales.shape != (shape[0],):
                     raise ValueError(f"Invalid Q2 row scales for {name}.")
-                if not np.isfinite(scales).all() or np.any(scales <= 0):
+                if not np.isfinite(scales).all() or (
+                    np.any(scales <= 0) if q2_version == 1 else np.any(scales < 0)
+                ):
                     raise ValueError(f"Invalid or non-finite Q2 scales for {name}.")
                 packed_weight_bytes += int(packed.nbytes)
                 scale_bytes += int(scales.nbytes)
@@ -168,7 +199,8 @@ def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
             f"{config.estimated_parameter_count():,}."
         )
     return {
-        "format": "qmini-packed-v1",
+        "format": archive_format,
+        "q2_version": q2_version,
         "tensor_count": len(seen),
         "parameter_count": parameter_count,
         "q2_tensor_count": q2_count,
