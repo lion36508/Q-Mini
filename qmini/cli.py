@@ -4,7 +4,10 @@ import torch
 from .config import QMiniConfig
 from .data import prepare_token_streams
 from .generate import generate, interactive_chat, load_model
-from .evaluate import emit_report, evaluate_language_model, evaluate_task_file
+from .evaluate import (
+    emit_report, evaluate_language_model, evaluate_task_file,
+    evaluate_conversation_file,
+)
 from .model import QMiniMoE
 
 
@@ -268,6 +271,30 @@ def main() -> int:
         emit_report(report, a.output)
         return 0
     eval_tasks.set_defaults(func=do_eval_tasks)
+
+    eval_conversations = commands.add_parser(
+        "eval-conversations",
+        help="evaluate multi-turn conversation continuity using a JSONL task file",
+    )
+    eval_conversations.add_argument("--model-dir", required=True)
+    eval_conversations.add_argument("--dataset", required=True)
+    eval_conversations.add_argument("--max-new-tokens", type=int, default=128)
+    eval_conversations.add_argument("--limit", type=int, default=None)
+    eval_conversations.add_argument("--thinking-steps", type=int, default=None)
+    eval_conversations.add_argument("--device", default=None)
+    eval_conversations.add_argument("--output", default=None)
+    def do_eval_conversations(a):
+        model, tokenizer, _device = load_model(a.model_dir, a.device)
+        try:
+            _validate_thinking_steps(a.thinking_steps, model.config.max_thinking_steps)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        report = evaluate_conversation_file(
+            model, tokenizer, a.dataset, a.max_new_tokens, a.limit, a.thinking_steps
+        )
+        emit_report(report, a.output)
+        return 0
+    eval_conversations.set_defaults(func=do_eval_conversations)
 
     args = parser.parse_args()
     result = args.func(args)
