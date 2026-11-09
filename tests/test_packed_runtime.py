@@ -233,3 +233,27 @@ def test_q2_v2_all_zero_depthwise_row_survives_export_and_packed_inference(
         actual = packed(ids)["logits"]
     assert torch.isfinite(actual).all()
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+
+def test_packed_runtime_rejects_q2_v2_codebook_metadata_mismatch(
+    tiny_config, tmp_path
+):
+    from qmini.export import export_packed_state
+
+    model = QMiniMoE(_packed_config(tiny_config))
+    source = export_packed_state(
+        model.state_dict(), model.config, tmp_path / "valid-v2.npz"
+    )
+    corrupted = tmp_path / "mismatched-v2.npz"
+    with np.load(source, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    metadata = json.loads(str(arrays["metadata_json"].item()))
+    metadata["quaternary_codes"]["01"] = -1.0
+    arrays["metadata_json"] = np.asarray(
+        json.dumps(metadata, separators=(",", ":"))
+    )
+    np.savez_compressed(corrupted, **arrays)
+
+    with pytest.raises(ValueError, match="contract/codebook metadata"):
+        load_packed_model(corrupted, expected_config=model.config)
