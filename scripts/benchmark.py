@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import platform
 import time
+from pathlib import Path
 
 import torch
 
@@ -14,6 +15,34 @@ from qmini.native import native_kernel_status
 def synchronize(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+def peak_process_rss_bytes() -> int | None:
+    """Return process peak RSS where the platform exposes getrusage."""
+    try:
+        import resource
+        value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ImportError, OSError, ValueError):
+        return None
+    # macOS reports bytes; Linux and the supported BSD CI targets report KiB.
+    return value if platform.system() == "Darwin" else value * 1024
+
+
+def cpu_model_name() -> str:
+    name = platform.processor().strip()
+    if name:
+        return name
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.is_file():
+        try:
+            for line in cpuinfo.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.lower().startswith(("model name", "hardware", "processor")):
+                    candidate = line.split(":", 1)[-1].strip()
+                    if candidate:
+                        return candidate
+        except OSError:
+            pass
+    return platform.machine() or "unknown"
 
 
 @torch.inference_mode()
@@ -41,6 +70,14 @@ def main() -> None:
         description="Measure Q-Mini full forward, prompt prefill and cached decode throughput."
     )
     parser.add_argument("--config", default="configs/qmini_base.json")
+    parser.add_argument(
+        "--model-dir", default=None,
+        help="load a trained model bundle; prefers the packed Q2 CPU runtime when available",
+    )
+    parser.add_argument(
+        "--device", default=None,
+        help="execution device; leave unset to auto-select (packed model bundles default to CPU)",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--seq-len", type=int, default=128, help="Synthetic prompt length.")
     parser.add_argument("--iterations", type=int, default=20, help="Measured iterations or decode tokens.")
@@ -58,15 +95,30 @@ def main() -> None:
     if not 1 <= args.thinking_steps <= config.max_thinking_steps:
         raise SystemExit("thinking-steps exceeds the configured limit.")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = QMiniMoE(config).to(device).eval()
+    if args.model_dir:
+        from qmini.generate import load_model
+        model, _tokenizer, device = load_model(args.model_dir, args.device)
+        config = model.config
+        if args.thinking_steps > config.max_thinking_steps:
+            raise SystemExit(
+                f"thinking-steps exceeds model limit {config.max_thinking_steps}."
+            )
+    else:
+        device = torch.device(
+            args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        model = QMiniMoE(config).to(device).eval()
     prompt_ids = torch.randint(
         0, config.vocab_size, (args.batch_size, args.seq_len), device=device
     )
 
     print(f"python={platform.python_version()}")
     print(f"torch={torch.__version__}")
+    print(f"platform={platform.platform()}")
     print(f"device={device}")
+    print(f"cpu_model={cpu_model_name()}")
+    print(f"runtime_model_bundle={args.model_dir or 'random-initialized-config'}")
+    print(f"packed_q2_runtime={bool(getattr(model, '_qmini_packed_runtime', False))}")
     backend = native_kernel_status()
     print(f"cpu_projection_backend={backend['backend']}")
     print(f"arm_neon={backend['uses_neon']}")
@@ -127,6 +179,8 @@ def main() -> None:
 
         if device.type == "cuda":
             print(f"peak_cuda_memory_bytes={torch.cuda.max_memory_allocated(device)}")
+        rss = peak_process_rss_bytes()
+        print(f"peak_process_rss_bytes={rss if rss is not None else 'unavailable'}")
 
 
 if __name__ == "__main__":
