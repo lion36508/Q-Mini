@@ -75,6 +75,41 @@ jobs:
               assert "qmini/native_kernel.cpp" in archive.namelist()
           print("Wheel includes qmini/native_kernel.cpp")
           PY
+      - name: Capture reproducible CPU reference benchmark
+        run: |
+          python scripts/benchmark.py \
+            --config configs/qmini_smoke.json \
+            --batch-size 1 --seq-len 32 --iterations 25 --warmup 5 \
+            --thinking-steps 1 --mode both \
+            --output /tmp/qmini-cpu-reference-benchmark.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("/tmp/qmini-cpu-reference-benchmark.json")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          required = (
+              "python", "pytorch", "platform", "cpu_model",
+              "parameters", "prefill_input_tokens_per_second",
+              "decode_tokens_per_second", "peak_process_rss_bytes",
+          )
+          missing = [key for key in required if key not in report]
+          if missing:
+              raise SystemExit(f"Benchmark report missing fields: {missing}")
+          if report["runtime_model"] != "random-initialized-config":
+              raise SystemExit("Reference benchmark must identify random weights.")
+          if report["prefill_input_tokens_per_second"] <= 0:
+              raise SystemExit("Prefill throughput is invalid.")
+          if report["decode_tokens_per_second"] <= 0:
+              raise SystemExit("Decode throughput is invalid.")
+          print(json.dumps(report, indent=2))
+          PY
+      - name: Upload reproducible CPU reference benchmark
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmini-cpu-reference-benchmark
+          path: /tmp/qmini-cpu-reference-benchmark.json
+          if-no-files-found: error
       - name: Run audit and CLI checks
         run: |
           python -m qmini.cli audit --config configs/qmini_smoke.json
