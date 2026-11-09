@@ -81,3 +81,7 @@ An NLL decrease or task-score increase on a small sample is evidence only for th
 
 When a prepared assistant-only mask contains very few positive target tokens, the trainer builds a disk-backed \`SupervisedWindowIndex\` once before model/optimizer allocation. It counts valid windows in bounded blocks and samples uniformly from all starts whose shifted label mask contains at least one supervised target. It preserves the exact alignment \`mask[start + 1:start + seq_len + 1]\`. It fails early only when the stream has no legal supervised window, rather than failing probabilistically after 128 random proposals.
 
+
+
+
+Final model manifests now bind the dense model.pt snapshot and packed model.qmini.npz export with independent SHA-256 fingerprints and byte counts. Quantization ablations reject a dense reference whose manifest, config, parameter count, packed artifact size or hashes do not match. This is separate from the resumable latest.pt checkpoint contract.
