@@ -16,6 +16,38 @@ def quantize_quaternary(weight: torch.Tensor, eps: float = 1e-8) -> torch.Tensor
     return weight + (q - weight).detach()
 
 
+def quantize_int8_rowwise(
+    weight: torch.Tensor,
+    eps: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Symmetric signed-INT8 weight quantization with one AbsMax scale per row."""
+    if weight.ndim < 2:
+        raise ValueError("Weight tensor must have at least two dimensions.")
+    if not torch.isfinite(weight).all():
+        raise ValueError("INT8 quantization rejects non-finite weights.")
+    if not np.isfinite(eps) or eps <= 0:
+        raise ValueError("eps must be finite and positive.")
+    flat = weight.detach().float().reshape(weight.shape[0], -1)
+    scales = (flat.abs().amax(dim=-1) / 127.0).clamp_min(eps)
+    quantized = torch.round(flat / scales[:, None]).clamp(-127, 127)
+    return quantized.reshape_as(weight).to(torch.int8), scales.to(torch.float32)
+
+
+def dequantize_int8_rowwise(
+    quantized: torch.Tensor,
+    scales: torch.Tensor,
+) -> torch.Tensor:
+    """Dequantize row-scaled INT8 weights while preserving the original tensor shape."""
+    if quantized.ndim < 2 or quantized.dtype != torch.int8:
+        raise TypeError("INT8 weights must be an int8 tensor with at least two dimensions.")
+    if scales.dtype != torch.float32 or scales.shape != (quantized.shape[0],):
+        raise TypeError("INT8 row scales must be a float32 vector, one scale per row.")
+    if not torch.isfinite(scales).all() or torch.any(scales <= 0):
+        raise ValueError("INT8 row scales must be finite and positive.")
+    broadcast_shape = (scales.shape[0],) + (1,) * (quantized.ndim - 1)
+    return quantized.float() * scales.reshape(broadcast_shape)
+
+
 def quantize_int8_per_token(
     activation: torch.Tensor, eps: float = 1e-8
 ) -> tuple[torch.Tensor, torch.Tensor]:
