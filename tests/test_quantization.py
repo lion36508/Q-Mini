@@ -107,6 +107,11 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
             "parameters": model.parameter_report()["total"],
             "packed_export": packed_archive.name,
             "packed_export_bytes": packed_archive.stat().st_size,
+            "packed_export_sha256": hashlib.sha256(packed_archive.read_bytes()).hexdigest(),
+            "dense_snapshot_bytes": (model_dir / "model.pt").stat().st_size,
+            "dense_snapshot_sha256": hashlib.sha256(
+                (model_dir / "model.pt").read_bytes()
+            ).hexdigest(),
         }),
         encoding="utf-8",
     )
