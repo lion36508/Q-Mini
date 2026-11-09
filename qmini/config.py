@@ -231,5 +231,55 @@ class QMiniConfig:
             + metadata_reserve_bytes
         )
 
+    def estimated_streaming_state_bytes(
+        self,
+        batch_size: int = 1,
+        thinking_steps: int | None = None,
+    ) -> int:
+        """Estimate persistent CPU streaming state for the requested batch.
+
+        Uses FP32 convolution/SSM caches and int64 rolling token IDs. This
+        counts model state only, not Python/PyTorch allocator overhead.
+        """
+        self.validate()
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer.")
+        steps = self.max_thinking_steps if thinking_steps is None else thinking_steps
+        if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= self.max_thinking_steps:
+            raise ValueError("thinking_steps is outside the configured range.")
+
+        convolution_values = (
+            sum(self.dilations) + steps
+        ) * (self.kernel_size - 1) * self.d_model
+        convolution_bytes = convolution_values * 4 * batch_size
+        state_space_layers = self.n_layers + steps if self.use_state_space else 0
+        state_space_bytes = state_space_layers * self.d_model * 4 * batch_size
+        rolling_token_bytes = self.max_context * 8 * batch_size
+        return convolution_bytes + state_space_bytes + rolling_token_bytes
+
+    def estimated_cpu_inference_working_set_bytes(
+        self,
+        batch_size: int = 1,
+        thinking_steps: int | None = None,
+    ) -> int:
+        """Estimate packed weights + stream caches + largest FP32 fallback buffers.
+
+        This is a model-level working-set estimate, not a measured process RSS.
+        It excludes Python/PyTorch runtime baseline, allocator fragmentation,
+        OS overhead, tokenizer memory and transient NPZ decompression overlap.
+        """
+        self.validate()
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer.")
+        activation_width = 2 * self.d_model + self.d_hidden + self.vocab_size
+        activation_bytes = activation_width * 4 * batch_size
+        fallback_matrix_bytes = self.d_model * self.d_hidden * 4
+        return (
+            self.estimated_packed_export_bytes()
+            + self.estimated_streaming_state_bytes(batch_size, thinking_steps)
+            + activation_bytes
+            + fallback_matrix_bytes
+        )
+
     def main_receptive_field(self) -> int:
         return 1 + (self.kernel_size - 1) * sum(self.dilations)
