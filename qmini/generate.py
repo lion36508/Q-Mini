@@ -228,6 +228,10 @@ def _complete_chat_turns(
                 # An unfinished final message is deliberately discarded.
                 break
             message_end = end + len(end_marker)
+            # Keep separators after control markers. Without the newline,
+            # adjacent role markers can merge with body text in token counters.
+            while message_end < len(history) and history[message_end].isspace():
+                message_end += 1
         else:
             message_end = (
                 matches[index + 1].start()
@@ -258,12 +262,15 @@ def trim_chat_history(
     tokenizer,
     token_budget: int,
     has_control_tokens: bool = True,
+    *,
+    token_prefix: str = "",
+    token_suffix: str = "",
 ) -> str:
-    """Trim only whole, completed conversation turns from the oldest side.
+    """Trim whole completed turns from the oldest side without splitting roles.
 
-    A turn is one user message plus its following tool/assistant messages.
-    Role markers and end markers are preserved verbatim. If the newest
-    complete turn alone exceeds the budget, fail rather than corrupt structure.
+    Prefix/suffix are included in the tokenizer measurement so the caller can
+    budget the exact concatenated prompt. Tokenizer counts are not additive
+    across separately encoded fragments.
     """
     if token_budget < 1:
         raise ValueError("token_budget must be positive.")
@@ -276,7 +283,8 @@ def trim_chat_history(
     for turn in reversed(turns):
         candidate_turns = [turn, *kept]
         candidate = prefix + "".join(candidate_turns)
-        if len(tokenizer.encode(candidate).ids) > token_budget:
+        measured_candidate = token_prefix + candidate + token_suffix
+        if len(tokenizer.encode(measured_candidate).ids) > token_budget:
             break
         kept = candidate_turns
 
@@ -304,8 +312,7 @@ def prepare_chat_prompt(
         return history, prompt
 
     reserved_tokens = len(tokenizer.encode(memory_context + user_block).ids)
-    history_budget = max_context - reserved_tokens
-    if history_budget < 1:
+    if reserved_tokens > max_context:
         raise ValueError(
             "The current user message exceeds max_context when combined with saved context. "
             "Shorten this message or remove some saved notes."
@@ -318,8 +325,10 @@ def prepare_chat_prompt(
     trimmed_history = trim_chat_history(
         history,
         tokenizer,
-        token_budget=history_budget,
+        token_budget=max_context,
         has_control_tokens=has_control_tokens,
+        token_prefix=memory_context,
+        token_suffix=user_block,
     )
     prompt = memory_context + trimmed_history + user_block
     if len(tokenizer.encode(prompt).ids) > max_context:
