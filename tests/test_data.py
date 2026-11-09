@@ -3,8 +3,13 @@ import json
 import numpy as np
 import pytest
 
-from qmini.data import _encode_record, _record_segments, extract_text, iter_text_records, prepare_token_streams
+from qmini.data import _encode_dataset_text, _encode_record, _record_segments, extract_text, iter_text_records, prepare_token_streams
 from qmini.tokenizer import special_token_id, train_tokenizer
+
+
+def test_dataset_text_rejects_unpaired_unicode_surrogates():
+    with pytest.raises(ValueError, match="invalid Unicode surrogate"):
+        _encode_dataset_text("malformed " + chr(0xD800))
 
 
 def test_extract_chat_messages():
