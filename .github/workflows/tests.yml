@@ -80,12 +80,13 @@ jobs:
           (cd /tmp && /tmp/qmini-wheel-venv/bin/python -m qmini.native --build)
       - name: Capture reproducible CPU native and fallback benchmarks
         run: |
-          python scripts/benchmark.py \
+          QMINI_NATIVE_FORCE_SCALAR=1 python scripts/benchmark.py \
             --config configs/qmini_smoke.json \
             --batch-size 1 --seq-len 32 --iterations 25 --warmup 5 \
             --thinking-steps 1 --seed 42 --mode both \
             --output /tmp/qmini-cpu-native-benchmark.json
-          QMINI_NATIVE_LIBRARY=/tmp/qmini-no-native.so \
+          env -u QMINI_NATIVE_FORCE_SCALAR \
+            QMINI_NATIVE_LIBRARY=/tmp/qmini-no-native.so \
             python scripts/benchmark.py \
               --config configs/qmini_smoke.json \
               --batch-size 1 --seq-len 32 --iterations 25 --warmup 5 \
