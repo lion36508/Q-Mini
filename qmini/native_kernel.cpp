@@ -16,11 +16,24 @@
 #define QMINI_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-static inline int32_t qmini_decode_weight(const uint8_t* packed_row, int feature) {
+static inline int32_t qmini_decode_weight(
+    const uint8_t* packed_row, int feature, int q2_version
+) {
     const uint8_t packed = packed_row[feature / 4];
     const uint8_t code = static_cast<uint8_t>(
         (packed >> ((feature % 4) * 2)) & 0x03
     );
+    if (q2_version == 1) {
+        // Q2-v1 compatibility: doubled effective values {-4,-2,+2,+4}.
+        switch (code) {
+            case 0: return -4;
+            case 1: return -2;
+            case 2: return 2;
+            default: return 4;
+        }
+    }
+    // Q2-v2 normalized codebook, represented in half-units:
+    // {-1,-0.5,+0.5,+1} -> {-2,-1,+1,+2}.
     switch (code) {
         case 0: return -2;
         case 1: return -1;
@@ -32,7 +45,8 @@ static inline int32_t qmini_decode_weight(const uint8_t* packed_row, int feature
 static int64_t qmini_accumulate_i8_q2(
     const int8_t* input_row,
     const uint8_t* packed_row,
-    int in_features
+    int in_features,
+    int q2_version
 ) {
 #if QMINI_HAS_NEON
     // Expand eight 2-bit weights at a time, multiply signed INT8 x {-2,-1,1,2},
@@ -47,7 +61,7 @@ static int64_t qmini_accumulate_i8_q2(
     for (; feature + 8 <= in_features; feature += 8) {
         for (int lane = 0; lane < 8; ++lane) {
             unpacked_weights[lane] = static_cast<int8_t>(
-                qmini_decode_weight(packed_row, feature + lane)
+                qmini_decode_weight(packed_row, feature + lane, q2_version)
             );
         }
 
@@ -80,14 +94,14 @@ static int64_t qmini_accumulate_i8_q2(
     // Scalar tail for dimensions not divisible by eight.
     for (; feature < in_features; ++feature) {
         accumulator += static_cast<int64_t>(input_row[feature]) *
-                       qmini_decode_weight(packed_row, feature);
+                       qmini_decode_weight(packed_row, feature, q2_version);
     }
     return accumulator;
 #else
     int64_t accumulator = 0;
     for (int feature = 0; feature < in_features; ++feature) {
         accumulator += static_cast<int64_t>(input_row[feature]) *
-                       qmini_decode_weight(packed_row, feature);
+                       qmini_decode_weight(packed_row, feature, q2_version);
     }
     return accumulator;
 #endif
@@ -97,7 +111,7 @@ static int64_t qmini_accumulate_i8_q2(
 // 00=-2, 01=-1, 10=+1, 11=+2.
 // The inner product uses integer accumulation; scales and bias are applied once
 // after the accumulator is reduced. ARM builds use NEON when the target supports it.
-QMINI_EXPORT int qmini_linear_i8(
+QMINI_EXPORT int qmini_linear_i8_v2(
     const int8_t* input,
     const uint8_t* packed_weights,
     const float* weight_scales,
@@ -106,13 +120,15 @@ QMINI_EXPORT int qmini_linear_i8(
     float* output,
     int rows,
     int in_features,
-    int out_features
+    int out_features,
+    int q2_version
 ) {
     if (!input || !packed_weights || !weight_scales || !input_scales || !output) {
         return 1;
     }
     if (rows <= 0 || in_features <= 0 || out_features <= 0 ||
-        in_features > std::numeric_limits<int>::max() - 3) {
+        in_features > std::numeric_limits<int>::max() - 3 ||
+        (q2_version != 1 && q2_version != 2)) {
         return 2;
     }
 
@@ -123,7 +139,9 @@ QMINI_EXPORT int qmini_linear_i8(
     }
     for (int output_index = 0; output_index < out_features; ++output_index) {
         if (!std::isfinite(weight_scales[output_index]) ||
-            weight_scales[output_index] <= 0.0f) {
+            (q2_version == 1
+                ? weight_scales[output_index] <= 0.0f
+                : weight_scales[output_index] < 0.0f)) {
             return 4;
         }
         if (bias && !std::isfinite(bias[output_index])) {
@@ -142,11 +160,11 @@ QMINI_EXPORT int qmini_linear_i8(
                 static_cast<std::size_t>(in_features);
 
             const int64_t accumulator =
-                qmini_accumulate_i8_q2(input_row, weight_row, in_features);
+                qmini_accumulate_i8_q2(input_row, weight_row, in_features, q2_version);
 
             const float offset = bias ? bias[output_index] : 0.0f;
             const float scaled = static_cast<float>(accumulator) *
-                input_scales[row] * weight_scales[output_index];
+                input_scales[row] * weight_scales[output_index] * 0.5f;
             output[static_cast<std::size_t>(row) *
                 static_cast<std::size_t>(out_features) +
                 static_cast<std::size_t>(output_index)] = scaled + offset;
