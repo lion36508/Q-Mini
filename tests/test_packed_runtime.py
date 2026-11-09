@@ -1,3 +1,5 @@
+import json
+import numpy as np
 import torch
 
 from qmini.export import export_packed_state
@@ -105,6 +107,95 @@ def test_dense_single_expert_archive_loads_without_router(tiny_config, tmp_path)
         for name, _ in packed.named_parameters()
     )
     ids = torch.randint(0, config.vocab_size, (1, 7))
+    with torch.inference_mode():
+        expected = reference(ids)["logits"]
+        actual = packed(ids)["logits"]
+    assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+
+def _write_legacy_q2_v1_archive(state_dict, config, path):
+    arrays = {}
+    specs = []
+    for index, (name, tensor) in enumerate(state_dict.items()):
+        value = tensor.detach().float().cpu().contiguous().numpy()
+        if value.ndim >= 2:
+            rows = value.shape[0]
+            flat = value.reshape(rows, -1)
+            scales = np.maximum(np.mean(np.abs(flat), axis=1), 1e-8).astype(np.float32)
+            magnitude = np.where(
+                np.abs(flat) / scales[:, None] >= 1.5, 2, 1
+            )
+            quantized = np.where(flat < 0, -magnitude, magnitude).astype(np.int8)
+            codes = np.where(
+                quantized == -2, 0,
+                np.where(quantized == -1, 1, np.where(quantized == 1, 2, 3)),
+            ).astype(np.uint8)
+            columns = flat.shape[1]
+            padded = np.zeros((rows, ((columns + 3) // 4) * 4), dtype=np.uint8)
+            padded[:, :columns] = codes
+            packed = (
+                padded[:, 0::4]
+                | (padded[:, 1::4] << 2)
+                | (padded[:, 2::4] << 4)
+                | (padded[:, 3::4] << 6)
+            )
+            packed_key, scale_key = f"p_{index}", f"s_{index}"
+            arrays[packed_key] = packed
+            arrays[scale_key] = scales
+            specs.append({
+                "name": name, "kind": "q2", "shape": list(value.shape),
+                "packed_key": packed_key, "scale_key": scale_key,
+                "in_features": int(columns),
+            })
+        else:
+            value_key = f"f_{index}"
+            arrays[value_key] = value.astype(np.float16)
+            specs.append({
+                "name": name, "kind": "fp16", "shape": list(value.shape),
+                "value_key": value_key,
+            })
+    metadata = {
+        "format": "qmini-packed-v1",
+        "config": config.to_dict(),
+        "tensor_count": len(specs),
+        "quaternary_tensor_count": sum(item["kind"] == "q2" for item in specs),
+        "fp16_tensor_count": sum(item["kind"] == "fp16" for item in specs),
+        "tensors": specs,
+        "quaternary_codes": {"00": -2, "01": -1, "10": 1, "11": 2},
+    }
+    arrays["metadata_json"] = np.asarray(json.dumps(metadata, separators=(",", ":")))
+    np.savez_compressed(path, **arrays)
+    return path
+
+
+
+def test_legacy_q2_v1_export_reconstruct_and_runtime_compatibility(
+    tiny_config, tmp_path
+):
+    from qmini.export import reconstruct_packed_state, verify_packed_export
+
+    torch.manual_seed(992)
+    config = _packed_config(tiny_config, state_space=True)
+    reference = QMiniMoE(config).eval()
+    path = _write_legacy_q2_v1_archive(
+        reference.state_dict(), config, tmp_path / "legacy-v1.qmini.npz"
+    )
+
+    report = verify_packed_export(path)
+    assert report["format"] == "qmini-packed-v1"
+    assert report["q2_version"] == 1
+    legacy_config, reconstructed = reconstruct_packed_state(path)
+    assert legacy_config.to_dict() == config.to_dict()
+    assert set(reconstructed) == set(reference.state_dict())
+
+    packed = load_packed_model(path, expected_config=config)
+    assert packed._qmini_packed_runtime is True
+    for module in packed.modules():
+        if getattr(module, "_qmini_packed_weight", None) is not None:
+            assert module._qmini_q2_version == 1
+
+    ids = torch.randint(0, config.vocab_size, (1, 11))
     with torch.inference_mode():
         expected = reference(ids)["logits"]
         actual = packed(ids)["logits"]
