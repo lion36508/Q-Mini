@@ -4,7 +4,7 @@
 
 ```text
 Token IDs
-  -> quaternary token embedding
+   -> Q2 token embedding
   -> [QMiniBlock x 6]
        -> RMSNorm
        -> quantized content/gate projection
@@ -31,9 +31,11 @@ Each convolution is padded only on the left by `dilation * (kernel_size - 1)`. N
 
 ## Quantization
 
-Trainable master weights remain FP32 and are fake-quantized using the Q2-v2 normalized codebook {-1,-0.5,+0.5,+1} with STE. Activations use per-token AbsMax scaling to signed INT8 [-127,127], also with STE. The deployment archive stores four 2-bit codes per byte, one FP32 row scale and FP16 one-dimensional vectors. Optimizer state is not 2-bit.
+Production matrix weights use exactly the Q2-v2 normalized codebook {-1.0, -0.5, +0.5, +1.0}, with two bits per symbol. Each output row has FP32 scale = 2 × mean(abs(original row)); decoded effective weight = normalized symbol × row scale. Four symbols are packed per byte. A fully zero row has scale 0 and remains exact zero; an exact-zero source entry in a nonzero row maps to +0.5 × row scale because there is no zero symbol.
 
-The packed loader constructs the same module graph on the meta device, then installs packed buffers and small FP16 vectors. New exports use Q2-v2 with row scale 2 * mean(abs(original row)); all-zero rows use scale zero. The loader continues to decode legacy Q2-v1 artifacts using the old {-2,-1,+1,+2} codebook. It does not materialize dense 5B FP32 matrices. CPU QLinear projections and the tied vocabulary projection use the C++17 INT8-by-Q2 kernel when `libqmini_kernel.so` is available. Without the kernel, the PyTorch fallback decodes one matrix at a time; the tied vocabulary projection decodes bounded row chunks. The depthwise convolution kernels are small and decoded lazily. The packed runtime is inference-only; training always uses FP32 master parameters and the PyTorch STE path.
+QAT uses FP32 master parameters/optimizer state with STE; those are training state, not deployed matrix weights. Activations use signed INT8 and do not widen matrix weights. New exports use Q2-v2; legacy Q2-v1 artifacts retain their original decoder. The normative codebook, metadata and edge cases are in [Q2_QUANTIZATION_SPEC.md](Q2_QUANTIZATION_SPEC.md).
+
+The packed loader installs matrix codes and row scales without materializing all dense 5B FP32 matrices. CPU QLinear projections and the tied vocabulary projection use the versioned C++17 INT8-by-Q2 kernel when the compatible shared library is available. Otherwise, the PyTorch fallback decodes one matrix at a time and the tied vocabulary projection in bounded row chunks. The packed runtime is inference-only; training uses the FP32 QAT master parameters.
 
 ## Sparse experts and refinement
 
@@ -43,7 +45,7 @@ The authoritative parameter count is computed from `sum(p.numel() for p in model
 
 ## Native runtime boundary
 
-The native kernel covers dense linear projections only. AArch64/NEON builds use vector widening multiply and pairwise integer accumulation for the INT8-by-quaternary dot product; other targets use the scalar integer fallback. Causal depthwise convolution, RMSNorm, token embedding lookup, sparse dispatch and state management remain PyTorch operations. This is a packed low-memory hybrid runtime, not a fully integer-only or fully native ARM64 graph. CI cross-compiles the C++ primitive for AArch64, but only a real Android device benchmark can establish phone speed, peak resident RAM, thermal stability and Android compatibility.
+The native kernel covers dense linear projections only. AArch64/NEON builds use vector widening multiply and pairwise integer accumulation for the INT8-by-Q2-v2 dot product; other targets use the scalar integer fallback. Causal depthwise convolution, RMSNorm, token embedding lookup, sparse dispatch and state management remain PyTorch operations. This is a packed low-memory hybrid runtime, not a fully integer-only or fully native ARM64 graph. CI cross-compiles the C++ primitive for AArch64, but only a real Android device benchmark can establish phone speed, peak resident RAM, thermal stability and Android compatibility.
 
 
 ## Local memory boundary

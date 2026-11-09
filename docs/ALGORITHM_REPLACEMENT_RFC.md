@@ -73,24 +73,17 @@ References:
 - https://github.com/RWKV/RWKV-LM
 - https://huggingface.co/docs/transformers/en/model_doc/rwkv
 
-### Candidate C — BitNet b1.58 ternary quantization (quantization experiment, not the primary architecture)
+### Candidate C — quantization diagnostics must not change production Q2
 
-The existing Q-Mini Q2 alphabet is `{-2, -1, +1, +2}`; it has no zero code. Thus a weight that is exactly zero cannot remain zero after quantization, and the row-wise scale/threshold choice may produce substantial approximation error. This is not proof that the implementation is mathematically invalid, but it is a serious quantization-quality risk that needs measurement.
+The production matrix-weight format is fixed at exactly two bits per symbol with normalized codebook `{-1.0, -0.5, +0.5, +1.0}`. New Q2-v2 rows use scale `2 * mean(abs(original_row))`; see [Q2_QUANTIZATION_SPEC.md](Q2_QUANTIZATION_SPEC.md). This four-symbol codebook has no zero symbol: exact-zero entries in nonzero rows map to positive half-scale, while an all-zero row has scale zero and reconstructs exactly to zero.
 
-BitNet b1.58 is a relevant from-scratch quantization research direction because its weight alphabet is ternary `{-1, 0, +1}`. Hugging Face documents both config-based construction and checkpoint loading for its BitNet model. However, the full documented BitNet language model is an attention-based architecture, so **do not substitute the entire BitNetForCausalLM graph into the attention-free Q-Mini branch**. Evaluate only the ternary quantization/linear-layer ideas as a separate research experiment or branch, ported to the chosen non-attention mixer.
+FP16/BF16 references and INT8/INT4/ternary reconstruction helpers may be used only to measure approximation error on Q-Mini-owned checkpoints. They are not alternative production model formats and must not be selected by training, export, loading or inference. No third-party pretrained weights are permitted, and the no-self-attention architecture remains unchanged.
 
-Recommended order:
-1. establish a non-quantized FP32/BF16 training baseline;
-2. train a small model to a stable held-out loss;
-3. export and compare FP16/BF16, INT8, group-wise INT4, ternary 1.58-bit, and the current Q2 format;
-4. only then test quantization-aware training (QAT) if post-training quantization is insufficient.
-
-For each format report per-layer relative L2 error, cosine similarity, activation outliers, validation NLL/perplexity and task-level regression. Packed artifact size alone is not an accuracy or runtime result.
-
-References:
-- https://arxiv.org/abs/2402.17764
-- https://huggingface.co/docs/transformers/model_doc/bitnet
-- https://github.com/microsoft/BitNet
+Recommended sequence:
+1. establish a repeatable learning/evaluation baseline from Q-Mini random initialization;
+2. measure per-layer Q2 reconstruction error and held-out loss against a higher-precision diagnostic reference;
+3. keep Q2-v2 as the only production matrix-weight export/runtime format;
+4. change QAT/threshold implementation only when tests preserve the exact four-symbol codebook, QAT/packer parity and held-out model quality.
 
 ## 4. Sparse experts: retain only after the dense path is proven
 
@@ -169,7 +162,7 @@ The corresponding older issues may remain open even though code has changed. Rec
 ### Remaining concrete findings
 
 1. `AdamW(model.parameters(), weight_decay=...)` applies decay to every parameter, including one-dimensional normalization scales and biases. Treat excluding those tensors as an experiment and report the result; it is not automatically a correctness failure.
-2. The custom Q2 format excludes zero and is not yet justified by a reported quality/accuracy ablation. Keep it out of the first baseline.
+2. Q2-v2 excludes a zero symbol: exact-zero entries in nonzero rows map to +0.5 × row scale. Keep this trade-off documented and require held-out quality measurements; do not widen or replace the production codebook.
 3. The dense-vs-sparse comparison needs matched training runs. The current 5B and 853M configurations are specifications, not evidence of a trained assistant or a measured 4GB device result.
 4. The latest CI run must finish successfully on the exact main commit before describing the repository as passing tests. ARM64 cross-compilation is not a real handset benchmark.
 
@@ -187,7 +180,7 @@ Train from random initialization:
 - a dense Mamba-2/SSD reference;
 - optionally a RWKV-7 implementation in a fully isolated branch.
 
-Start at a size that can be trained repeatedly and inspected. Do not introduce MoE or Q2 yet.
+Start at a size that can be trained repeatedly and inspected. Keep the production matrix-weight contract fixed at Q2-v2; higher-precision tensors may be used only as a diagnostic reference for controlled comparisons.
 
 ### Stage 2 — scale the winning dense model
 Scale in measured steps (for example, around 5M, 25M, 100–150M, then a larger dense reference). At every stage record tokens seen, compute, training stability, validation NLL, task scores, RAM/VRAM and throughput. Increase size only when the smaller run has a stable learning curve and reproducible quality.
@@ -196,7 +189,7 @@ Scale in measured steps (for example, around 5M, 25M, 100–150M, then a larger 
 Compare dense FFN and Top-1 MoE under matched compute and held-out evaluation. Keep all experts' storage and optimizer costs in the resource calculation.
 
 ### Stage 4 — quantization
-Run post-training FP16/BF16, INT8, INT4 and ternary/Q2 ablations on the project's own trained weights. Add QAT only with a measured reason.
+Run reconstruction-error diagnostics on the project's own trained weights, with FP16/BF16 and optional INT8/INT4/ternary helpers as references only. Q2-v2 remains the sole production matrix-weight format; QAT changes must preserve its exact four-symbol codebook and pass task-level quality gates.
 
 ### Stage 5 — deployment
 Build and test a complete inference runtime for the chosen architecture. Measure real RSS, cold start, prefill, decode tokens/sec, thermal behavior and energy on every claimed target device. Do not use a weight-file size or a planner estimate as proof of a 4GB-phone deployment.
