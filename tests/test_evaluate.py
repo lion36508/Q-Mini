@@ -275,7 +275,7 @@ def test_multi_turn_evaluator_reports_whole_turn_eviction_at_context_limit(
             import re
             return SimpleNamespace(
                 ids=re.findall(
-                    r"<\|(?:system|user|assistant)\|>|<\|end\|>|[^\\s<]+",
+                    r"<\|(?:system|user|assistant)\|>|<\|end\|>|[^\s<]+",
                     text,
                 )
             )
