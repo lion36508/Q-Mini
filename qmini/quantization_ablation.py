@@ -146,6 +146,26 @@ def run_ablation(
                 f"Config file not found beside model weights: {config_path}"
             )
         config = QMiniConfig.from_json(config_path)
+        manifest_path = config_path.parent / "model_manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                "A Q-Mini final_model/model.pt source must include its "
+                "model_manifest.json provenance record."
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("format") != "qmini-final-model-v2":
+            raise ValueError("Unsupported or missing Q-Mini final model manifest format.")
+        if manifest.get("config") != config.to_dict():
+            raise ValueError("Final model manifest config does not match config.json.")
+        if int(manifest.get("parameters", -1)) != config.estimated_parameter_count():
+            raise ValueError("Final model manifest parameter count does not match config.json.")
+        packed_name = manifest.get("packed_export")
+        packed_bytes = manifest.get("packed_export_bytes")
+        if not isinstance(packed_name, str) or not packed_name:
+            raise ValueError("Final model manifest does not identify its packed Q2 export.")
+        packed_path = config_path.parent / packed_name
+        if not packed_path.is_file() or packed_path.stat().st_size != packed_bytes:
+            raise ValueError("Final model manifest packed-export size/path fingerprint is invalid.")
         state = loaded
         source_kind = "qmini-final-model-state-dict"
 
