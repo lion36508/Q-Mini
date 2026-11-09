@@ -245,8 +245,8 @@ class QMiniConfig:
     ) -> int:
         """Estimate persistent CPU streaming state for the requested batch.
 
-        Uses FP32 convolution/SSM caches and int64 rolling token IDs. This
-        counts model state only, not Python/PyTorch allocator overhead.
+        Uses FP32 convolution/SSM caches. This counts model state only, not
+        Python/PyTorch allocator overhead.
         """
         self.validate()
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
