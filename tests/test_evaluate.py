@@ -1,3 +1,4 @@
+import pytest
 import json
 
 import numpy as np
@@ -57,3 +58,56 @@ def test_task_evaluation_aggregates_categories(tiny_config, tmp_path, monkeypatc
     assert report["categories"]["math"]["exact_match"] == 1.0
     assert report["categories"]["science"]["mean_token_f1"] > 0.0
     assert len(report["cases"]) == 2
+
+
+
+def test_task_evaluation_uses_numeric_and_json_scorers_with_language_reports(
+    tiny_config, tmp_path, monkeypatch
+):
+    model = QMiniMoE(tiny_config)
+    dataset = tmp_path / "structured-tasks.jsonl"
+    dataset.write_text(
+        "\n".join([
+            json.dumps({
+                "category": "math", "language": "en",
+                "scorer": "numeric", "tolerance": 0.01,
+                "prompt": "What is 6 times 7?", "reference": "42",
+            }),
+            json.dumps({
+                "category": "format", "language": "hi",
+                "scorer": "json",
+                "prompt": "Return the requested JSON object.",
+                "reference": '{"ok":true,"count":3}',
+            }),
+            json.dumps({
+                "category": "format", "language": "as",
+                "scorer": "json",
+                "prompt": "Return invalid JSON for this deliberately failed example.",
+                "reference": '{"ok":false}',
+            }),
+        ]),
+        encoding="utf-8",
+    )
+    predictions = iter([
+        "The answer is 42.0",
+        '{"count": 3, "ok": true}',
+        "not-json",
+    ])
+    monkeypatch.setattr(
+        evaluate, "generate", lambda *args, **kwargs: next(predictions)
+    )
+
+    report = evaluate.evaluate_task_file(
+        model, tokenizer=object(), dataset_path=dataset, max_new_tokens=8
+    )
+    assert report["format"] == "qmini-task-evaluation-v2"
+    assert report["examples"] == 3
+    assert report["task_pass_rate"] == pytest.approx(2 / 3)
+    assert report["task_pass_rate_wilson_95"][0] < 2 / 3
+    assert report["categories"]["math"]["task_pass_rate"] == 1.0
+    assert report["categories"]["math"]["scorers"] == ["numeric"]
+    assert report["categories"]["format"]["examples"] == 2
+    assert set(report["languages"]) == {"en", "hi", "as"}
+    assert report["languages"]["as"]["task_pass_rate"] == 0.0
+    assert report["cases"][0]["passed"] is True
+    assert report["cases"][2]["scoring_error"].startswith("Invalid JSON:")
