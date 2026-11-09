@@ -364,9 +364,7 @@ class QMiniMoE(nn.Module):
             raise RuntimeError("Incremental inference requires model.eval().")
         if batch_size < 1:
             raise ValueError("batch_size must be positive.")
-        steps = self.config.thinking_steps if thinking_steps is None else int(thinking_steps)
-        if not 1 <= steps <= self.config.max_thinking_steps:
-            raise ValueError(f"thinking_steps must be 1..{self.config.max_thinking_steps}.")
+        steps = self._resolve_thinking_steps(thinking_steps)
         return QMiniStreamState(
             caches=[None] * (self.config.n_layers + steps),
             thinking_steps=steps,
