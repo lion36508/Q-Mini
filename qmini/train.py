@@ -971,6 +971,11 @@ def train_model(
     if dense_snapshot_included:
         _atomic_torch_save(model.state_dict(), final_dir / "model.pt")
 
+    packed_fingerprint = _sha256_file(packed_path)
+    dense_snapshot_fingerprint = (
+        _sha256_file(final_dir / "model.pt")
+        if dense_snapshot_included else None
+    )
     tokenizer_fingerprint = (
         _sha256_file(tokenizer_path)
         if tokenizer_path is not None and Path(tokenizer_path).is_file()
@@ -990,7 +995,16 @@ def train_model(
         ),
         "parameters": model.parameter_report()["total"],
         "packed_export": packed_path.name,
-        "packed_export_bytes": packed_path.stat().st_size,
+        "packed_export_bytes": packed_fingerprint["size_bytes"],
+        "packed_export_sha256": packed_fingerprint["sha256"],
+        "dense_snapshot_sha256": (
+            dense_snapshot_fingerprint["sha256"]
+            if dense_snapshot_fingerprint else None
+        ),
+        "dense_snapshot_bytes": (
+            dense_snapshot_fingerprint["size_bytes"]
+            if dense_snapshot_fingerprint else None
+        ),
         "estimated_q2_fp16_raw_bytes": config.estimated_packed_export_bytes(),
         "deployment_weight_budget_bytes": 1_500_000_000,
         "within_1_5gb_weight_artifact_budget": (
