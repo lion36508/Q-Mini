@@ -94,3 +94,7 @@ The resource planner accepts --world-size N --sharding-scenario fsdp-full-shard 
 
 
 The CLI requires an explicit total optimizer-step target via --steps; it has no implicit 1,000-step default. For example, --steps 50000 means train until a total of 50,000 optimizer updates. Resume with --resume; when increasing the saved scheduler horizon, pass --extend-schedule. The Colab notebook performs that extension when its user-selected target is increased.
+
+## Assistant SFT source and evaluation gates
+
+The Colab SFT stage does not silently fine-tune the tiny smoke checkpoint. By default it selects the largest completed base_*/final_model artifact with a valid Q-Mini final-model manifest, matching tokenizer and verified packed-export hash, and at least 50 million parameters. A smaller experiment requires an explicit SFT_SOURCE_OVERRIDE. SFT is refused unless independent held-out task and multi-turn conversation sets both exist and neither is byte-identical to an SFT training file. Both held-out hashes are included in the SFT run identity; both baselines run before SFT and both post-SFT evaluations run afterward. This prevents an unmeasured SFT run, but does not itself guarantee improved dialogue quality.
