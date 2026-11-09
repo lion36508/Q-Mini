@@ -241,8 +241,10 @@ def test_json_object_reader_and_private_source_manifest_paths(tmp_path):
         {"text": "A second independent source document with enough words."},
         {"text": "A third independent source document with enough words."},
     ]
-    source.write_text(json.dumps({"records": rows}), encoding="utf-8")
-    assert len(list(iter_text_records([source]))) == 1
+    source.write_text(json.dumps(rows), encoding="utf-8")
+    object_source = source.parent / "single-object.json"
+    object_source.write_text(json.dumps(rows[0]), encoding="utf-8")
+    assert len(list(iter_text_records([object_source]))) == 1
 
     tokenizer_source = tmp_path / "tokenizer-source.jsonl"
     tokenizer_source.write_text(
