@@ -59,3 +59,15 @@ Use fixed datasets, prompts and scoring methods when comparing revisions. Report
 The gated diagonal state-space path is accepted only when the parallel scan agrees with the sequential recurrence, gradients are finite, future-token changes cannot affect earlier logits, and incremental streaming logits match full-sequence logits within tolerance. These tests establish implementation correctness, not conversational competence.
 
 A capability report must additionally include fixed held-out tests for multi-turn continuity, instruction adherence, Assamese/Hindi/English performance, arithmetic and independently verified maths, science explanation, logic/state tracking, code-generation unit tests in a constrained runner, long-context recall and repetition/termination failures. Exact match and lexical token F1 are diagnostic metrics, not semantic reasoning scores.
+
+
+## Quantized deployment and sparse/dense comparison
+
+For the 5B design, compare the sparse profile against \`configs/qmini_dense_853m.json\` under a controlled compute budget. Keep tokenizer, train/validation documents, tokens seen, optimizer schedule and evaluation prompts identical. Report:
+- Validation NLL/perplexity and response-mask target count.
+- Multi-turn consistency, factuality checks, maths/logic accuracy, and sandboxed coding pass rate.
+- Per-expert load distribution, starvation/collapse, active compute and total resident model size.
+- Q2 packed versus dense/fake-quant output differences, including capability regression by task.
+- Prefill throughput, autoregressive decode latency/tokens/sec, peak process RSS, cold start and thermal behavior.
+
+The planner's 1.409 GB CPU working-set estimate for batch 1 is not a measured process RSS and does not establish a 4 GB-phone target. A release claim requires measurements on the actual device with the trained packed archive and tokenizer loaded.
