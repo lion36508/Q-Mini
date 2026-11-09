@@ -575,6 +575,9 @@ def evaluate_conversation_file(
                         history = ""
 
                 for turn_index, turn in enumerate(conversation["turns"], 1):
+                    _system_before, previous_turns = _complete_chat_turns(
+                        history, has_control_tokens
+                    )
                     user_block = (
                         f"<|user|>{turn['user']}\n<|end|>\n<|assistant|>"
                         if has_control_tokens
@@ -587,9 +590,6 @@ def evaluate_conversation_file(
                                 f"Conversation {conversation['id']} turn {turn_index} "
                                 "exceeds max_context by itself."
                             )
-                        _system_before, previous_turns = _complete_chat_turns(
-                            history, has_control_tokens
-                        )
                         history = trim_chat_history(
                             history,
                             tokenizer,
