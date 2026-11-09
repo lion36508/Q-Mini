@@ -665,6 +665,7 @@ def prepare_token_streams(
     valid_fraction: float = 0.02,
     loss_mask_mode: str = "auto",
     include_absolute_source_paths: bool = False,
+    near_duplicate_distance: int = 0,
 ) -> dict[str, object]:
     """Prepare deduplicated train/validation token and assistant-loss-mask streams.
 
@@ -679,6 +680,7 @@ def prepare_token_streams(
         raise ValueError("valid_fraction must be greater than 0 and below 0.5.")
     if loss_mask_mode not in {"auto", "all", "assistant"}:
         raise ValueError("loss_mask_mode must be one of: auto, all, assistant.")
+    _validate_near_duplicate_distance(near_duplicate_distance)
 
     paths = expand_data_paths(data_paths)
     if not paths:
@@ -728,33 +730,30 @@ def prepare_token_streams(
         "valid_target_tokens": 0,
         "train_documents": 0,
         "valid_documents": 0,
+        "near_duplicate_groups": 0,
+        "near_duplicate_documents_grouped": 0,
+        "near_duplicate_hamming_distance": near_duplicate_distance,
     }
 
     connection = sqlite3.connect(database_path)
     try:
         connection.execute("PRAGMA journal_mode=OFF")
         connection.execute("PRAGMA synchronous=OFF")
-        connection.execute(
-            "CREATE TABLE documents (digest BLOB PRIMARY KEY, is_valid INTEGER NOT NULL)"
-        )
+        _create_document_group_index(connection, near_duplicate_distance)
         connection.execute("CREATE TABLE written (digest BLOB PRIMARY KEY)")
 
-        # First pass: exact-content de-dup index stored on disk, not in Python RAM.
+        # First pass: exact duplicates and optional near-duplicate groups are
+        # indexed on disk, never retained as a Python list in memory.
         with connection:
             for record in iter_source_records(paths):
                 normalized = extract_text(record).strip()
                 if len(normalized) < 2:
                     stats["skipped_short_documents"] += 1
                     continue
-                digest = hashlib.sha256(
-                    normalized.encode("utf-8", errors="replace")
-                ).digest()
-                valid = int.from_bytes(digest[:8], "big") / (2**64) < valid_fraction
-                cursor = connection.execute(
-                    "INSERT OR IGNORE INTO documents(digest, is_valid) VALUES (?, ?)",
-                    (digest, int(valid)),
+                _digest, inserted = _register_document(
+                    connection, normalized, near_duplicate_distance
                 )
-                if cursor.rowcount == 1:
+                if inserted:
                     stats["unique_documents"] += 1
                 else:
                     stats["duplicate_documents"] += 1
@@ -765,20 +764,11 @@ def prepare_token_streams(
                 "At least two unique documents are required for non-empty train and validation sets."
             )
 
-        valid_count = int(connection.execute(
-            "SELECT COUNT(*) FROM documents WHERE is_valid=1"
-        ).fetchone()[0])
-        if valid_count == 0:
-            chosen = connection.execute(
-                "SELECT digest FROM documents ORDER BY digest LIMIT 1"
-            ).fetchone()[0]
-            connection.execute("UPDATE documents SET is_valid=1 WHERE digest=?", (chosen,))
-        elif valid_count == unique_count:
-            chosen = connection.execute(
-                "SELECT digest FROM documents ORDER BY digest DESC LIMIT 1"
-            ).fetchone()[0]
-            connection.execute("UPDATE documents SET is_valid=0 WHERE digest=?", (chosen,))
-        connection.commit()
+        grouping = _finalize_document_group_splits(connection, valid_fraction)
+        stats["near_duplicate_groups"] = grouping["groups"]
+        stats["near_duplicate_documents_grouped"] = (
+            unique_count - grouping["groups"]
+        )
 
         # Second pass: each unique source record is encoded once and split atomically.
         with (
@@ -794,16 +784,16 @@ def prepare_token_streams(
                 digest = hashlib.sha256(
                     normalized.encode("utf-8", errors="replace")
                 ).digest()
-                row = connection.execute(
-                    "SELECT is_valid FROM documents WHERE digest=?", (digest,)
-                ).fetchone()
-                if row is None:
+                if connection.execute(
+                    "SELECT 1 FROM documents WHERE digest=?", (digest,)
+                ).fetchone() is None:
                     raise RuntimeError("Source data changed during token preparation.")
                 inserted = connection.execute(
                     "INSERT OR IGNORE INTO written(digest) VALUES (?)", (digest,)
                 )
                 if inserted.rowcount == 0:
                     continue
+                is_validation = _document_is_validation(connection, digest)
 
                 encoded = _encode_record(
                     record, tokenizer, bos_id, eos_id, loss_mask_mode
@@ -819,7 +809,7 @@ def prepare_token_streams(
                 if not np.isin(loss_mask, (0, 1)).all():
                     raise RuntimeError("Loss mask must contain only binary values.")
 
-                if int(row[0]) == 1:
+                if is_validation:
                     token_ids.tofile(valid_file)
                     loss_mask.tofile(valid_mask_file)
                     stats["valid_tokens"] += int(token_ids.size)
@@ -863,7 +853,12 @@ def prepare_token_streams(
             "dtype": "uint16",
             "loss_mask_dtype": "uint8",
             "loss_mask_mode": loss_mask_mode,
-            "deduplication": "exact-document-sha256",
+            "deduplication": (
+                "exact-document-sha256"
+                if near_duplicate_distance == 0
+                else "exact-document-sha256+simhash64"
+            ),
+            "near_duplicate_hamming_distance": near_duplicate_distance,
             "absolute_source_paths_included": bool(include_absolute_source_paths),
             "source_files": source_manifest_before,
             "corpus_sha256": hashlib.sha256(corpus_descriptor).hexdigest(),
