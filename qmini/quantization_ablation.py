@@ -155,7 +155,11 @@ def run_ablation(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("format") != "qmini-final-model-v2":
             raise ValueError("Unsupported or missing Q-Mini final model manifest format.")
-        if manifest.get("config") != config.to_dict():
+        try:
+            manifest_config = QMiniConfig.from_dict(manifest.get("config"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Final model manifest contains an invalid config.") from exc
+        if manifest_config.to_dict() != config.to_dict():
             raise ValueError("Final model manifest config does not match config.json.")
         if int(manifest.get("parameters", -1)) != config.estimated_parameter_count():
             raise ValueError("Final model manifest parameter count does not match config.json.")
