@@ -11,8 +11,10 @@ def quantize_quaternary(weight: torch.Tensor, eps: float = 1e-8) -> torch.Tensor
     scale zero and reconstructs to exact zeros. Non-zero rows use +0.5 for
     exact-zero entries because the production codebook has no zero symbol.
     """
-    if weight.ndim < 2:
-        raise ValueError("Weight tensor must have at least two dimensions.")
+    if weight.ndim < 2 or any(size < 1 for size in weight.shape):
+        raise ValueError("Weight tensor must have at least two non-empty dimensions.")
+    if not np.isfinite(eps) or eps <= 0:
+        raise ValueError("eps must be finite and positive.")
     if not torch.isfinite(weight).all():
         raise ValueError("Q2 quantization rejects non-finite weights.")
     flat = weight.reshape(weight.shape[0], -1)
@@ -85,8 +87,8 @@ def pack_quaternary(weight: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
     Row scales are exactly 2 * mean(abs(original row)). All-zero rows use
     scale 0; their symbol bytes are ignored during reconstruction.
     """
-    if weight.ndim != 2:
-        raise ValueError("Expected a [out_features, in_features] matrix.")
+    if weight.ndim != 2 or weight.shape[0] < 1 or weight.shape[1] < 1:
+        raise ValueError("Expected a non-empty [out_features, in_features] matrix.")
     values = weight.detach().float().cpu().numpy()
     if not np.isfinite(values).all():
         raise ValueError("Q2 packing rejects non-finite weights.")
