@@ -120,6 +120,8 @@ def _ensure_json_eof(
 def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[object]:
     """Incrementally decode a top-level JSON array with bounded input buffering."""
     opening = handle.read(1)
+    while opening and opening.isspace():
+        opening = handle.read(1)
     if opening != "[":
         raise ValueError(f"Expected a top-level JSON array in {path}.")
     decoder = json.JSONDecoder()
