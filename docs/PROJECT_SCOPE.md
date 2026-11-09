@@ -16,7 +16,8 @@ The project is not an Android IDE, not an image model, not a multimodal model an
 - Legacy profiles use strictly causal left-padded 1D depthwise convolution. New hybrid profiles add a gated diagonal state-space recurrence with a differentiable parallel scan during training and an equivalent single-token recurrent update during streaming inference.
 - Decoder-only next-token language modeling, initialized from random parameters.
 - Sparse Top-1 expert routing in the current baseline.
-- Quaternary weight alphabet {-2, -1, +1, +2} with FP32 master parameters and STE.
+- The production matrix-weight alphabet is exactly Q2 {-1.0, -0.5, +0.5, +1.0}, packed at two bits per weight. QAT uses FP32 master parameters and STE; deployment stores Q2 matrix symbols plus row scales and separately stored vectors.
+- The Q2-v2 codebook, row-scale formula, zero-row rule and legacy-v1 compatibility are normative in [Q2_QUANTIZATION_SPEC.md](Q2_QUANTIZATION_SPEC.md).
 - Per-token AbsMax INT8 activation fake quantization with STE.
 - RMSNorm and residual paths.
 - Shared iterative refinement reuses one block for a configurable number of passes; it is not a symbolic proof engine.
@@ -39,7 +40,7 @@ The convolution mentioned here is a text-sequence operator; it does not imply im
 | Kernel width | 10 |
 | Dilations | 1, 2, 4, 8, 16, 32 |
 | Shared refinement | 1–4 repeated passes |
-| Weight values | -2, -1, +1, +2 |
+| Q2 normalized weight symbols | -1.0, -0.5, +0.5, +1.0 |
 | Activation path | Per-token INT8 fake quantization |
 
 Parameter accounting must be computed from the instantiated model. The convolution-only baseline has a finite receptive field determined by its dilation schedule. Hybrid profiles add causal compressed recurrent state without self-attention.
@@ -132,7 +133,7 @@ Checkpoint metadata should remain sufficient to reproduce a run: model state, op
 ### Phase A — Foundation correctness
 - Architecture tests prove no attention/QKV components exist.
 - Causality tests prove future tokens do not change earlier logits.
-- Quaternary packing/unpacking and STE gradient tests pass.
+- Q2-v2 packing/unpacking, four-symbol codebook, zero-row scale, legacy-v1 decoding and STE gradient tests pass.
 - Router gradients and per-expert assignment counts are verified.
 - Data, tokenizer, checkpoint/resume and export tests pass.
 - CI is green on the current source revision.

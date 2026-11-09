@@ -269,3 +269,18 @@ def test_neon_native_kernel_is_selected_without_force_flag(
         pytest.skip("This runner has no NEON backend.")
     monkeypatch.delenv("QMINI_NATIVE_FORCE_SCALAR", raising=False)
     assert native_module.native_kernel_should_be_used(kernel) is True
+
+
+
+def test_native_projection_supports_all_zero_q2_rows(compiled_native_library):
+    weight = torch.zeros(2, 5)
+    packed, scales = pack_quaternary(weight)
+    assert np.array_equal(scales, np.zeros(2, dtype=np.float32))
+    x = np.array([[0.25, -0.5, 0.75, 0.1, -0.2]], dtype=np.float32)
+    x_scale = np.maximum(np.max(np.abs(x), axis=1), 1e-8) / 127.0
+    x_q = np.rint(x / x_scale[:, None]).clip(-127, 127).astype(np.int8)
+    bias = np.array([0.25, -0.5], dtype=np.float32)
+    output = NativeKernel(compiled_native_library).linear(
+        x_q, packed, scales, x_scale, bias
+    )
+    assert np.allclose(output, bias[None, :], atol=1e-6, rtol=1e-6)

@@ -30,18 +30,14 @@ def _unpack_rows(
     scales: np.ndarray,
     row_ids: np.ndarray,
     in_features: int,
+    format_version: int = 2,
 ) -> np.ndarray:
-    selected = np.asarray(packed[row_ids], dtype=np.uint8)
-    selected_scales = np.asarray(scales[row_ids], dtype=np.float32).reshape(-1, 1)
-    codes = np.stack(
-        [((selected >> shift) & 3) for shift in (0, 2, 4, 6)],
-        axis=-1,
-    ).reshape(selected.shape[0], -1)[:, :in_features]
-    values = np.select(
-        [codes == 0, codes == 1, codes == 2, codes == 3],
-        [-2.0, -1.0, 1.0, 2.0],
-    ).astype(np.float32)
-    return values * selected_scales
+    return unpack_quaternary(
+        np.asarray(packed[row_ids], dtype=np.uint8),
+        np.asarray(scales[row_ids], dtype=np.float32),
+        in_features,
+        format_version=format_version,
+    )
 
 
 def packed_embedding_lookup(module: nn.Module, token_ids: torch.Tensor) -> torch.Tensor:
@@ -54,7 +50,10 @@ def packed_embedding_lookup(module: nn.Module, token_ids: torch.Tensor) -> torch
     ids = token_ids.detach().to(dtype=torch.long).numpy().reshape(-1)
     if ids.size and (int(ids.min()) < 0 or int(ids.max()) >= packed.shape[0]):
         raise ValueError("Token IDs are outside the packed embedding vocabulary.")
-    rows = _unpack_rows(packed, scales, ids, int(module._qmini_in_features))
+    rows = _unpack_rows(
+        packed, scales, ids, int(module._qmini_in_features),
+        int(getattr(module, "_qmini_q2_codebook_version", 2)),
+    )
     result = torch.from_numpy(rows).reshape(
         *token_ids.shape, int(module._qmini_in_features)
     )
@@ -71,6 +70,7 @@ def _fallback_packed_linear(
     in_features = int(module._qmini_in_features)
     out_features = int(module._qmini_out_features)
     quantized_input = fake_quantize_int8(x)
+    codebook_version = int(getattr(module, "_qmini_q2_codebook_version", 2))
 
     # The tied vocabulary projection can be large. Decode it in bounded row
     # chunks so CPU fallback never materializes the complete FP32 vocabulary.
@@ -79,7 +79,10 @@ def _fallback_packed_linear(
     for start in range(0, out_features, chunk_rows):
         end = min(out_features, start + chunk_rows)
         weight = torch.from_numpy(
-            unpack_quaternary(packed[start:end], scales[start:end], in_features)
+            unpack_quaternary(
+                packed[start:end], scales[start:end], in_features,
+                format_version=codebook_version,
+            )
         )
         chunk_bias = (
             bias[start:end].float()
@@ -110,10 +113,15 @@ def packed_linear_forward(
             bias.detach().float().contiguous().numpy()
             if bias is not None else None
         )
+        codebook_version = int(getattr(module, "_qmini_q2_codebook_version", 2))
+        weight_scales = _buffer_array(module, "_qmini_weight_scales")
+        # Current C++ applies half-scale for v2; compensate legacy v1 archives.
+        if codebook_version == 1:
+            weight_scales = weight_scales * 2.0
         output = kernel.linear(
             activations_i8.contiguous().numpy(),
             _buffer_array(module, "_qmini_packed_weight"),
-            _buffer_array(module, "_qmini_weight_scales"),
+            weight_scales,
             activation_scales.contiguous().numpy(),
             bias_array,
         )
@@ -145,7 +153,16 @@ def load_packed_model(
         if "metadata_json" not in archive:
             raise ValueError("Packed Q-Mini archive is missing metadata_json.")
         metadata = json.loads(str(archive["metadata_json"].item()))
-        if metadata.get("format") != "qmini-packed-v1":
+        fmt = metadata.get("format")
+        if fmt == "qmini-packed-v1":
+            codebook_version = 1
+        elif fmt == "qmini-packed-v2":
+            if metadata.get("quaternary_codes") != {
+                "00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0
+            }:
+                raise ValueError("Q2-v2 archive has an unexpected codebook.")
+            codebook_version = 2
+        else:
             raise ValueError("Unsupported Q-Mini packed export format.")
         config = QMiniConfig.from_dict(metadata["config"])
         if expected_config is not None and config.to_dict() != expected_config.to_dict():
@@ -187,7 +204,7 @@ def load_packed_model(
                     raise ValueError(f"Invalid packed matrix dimensions for {name}.")
                 if scales.dtype != np.float32 or scales.shape != (rows,):
                     raise ValueError(f"Invalid Q2 row scales for {name}.")
-                if not np.isfinite(scales).all() or np.any(scales <= 0):
+                if not np.isfinite(scales).all() or np.any(scales < 0):
                     raise ValueError(f"Non-finite or non-positive Q2 scale in {name}.")
                 if not isinstance(parent, (QLinear, QEmbedding, CausalGatedDepthwiseConv)):
                     raise ValueError(f"Unsupported Q2 parameter owner for {name}.")
@@ -202,6 +219,7 @@ def load_packed_model(
                 parent.register_buffer(
                     "_qmini_weight_scales", torch.from_numpy(scales), persistent=False
                 )
+                parent._qmini_q2_codebook_version = codebook_version
                 parent._qmini_weight_shape = shape
                 parent._qmini_in_features = in_features
                 parent._qmini_out_features = rows
@@ -244,7 +262,16 @@ def load_packed_state_into_trainable_model(
     archive_path = Path(path)
     with np.load(archive_path, allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata_json"].item()))
-        if metadata.get("format") != "qmini-packed-v1":
+        fmt = metadata.get("format")
+        if fmt == "qmini-packed-v1":
+            codebook_version = 1
+        elif fmt == "qmini-packed-v2":
+            if metadata.get("quaternary_codes") != {
+                "00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0
+            }:
+                raise ValueError("Q2-v2 archive has an unexpected codebook.")
+            codebook_version = 2
+        else:
             raise ValueError("Unsupported Q-Mini packed export format.")
         config = QMiniConfig.from_dict(metadata["config"])
         if config.to_dict() != model.config.to_dict():
@@ -268,7 +295,8 @@ def load_packed_state_into_trainable_model(
                     packed = np.asarray(archive[spec["packed_key"]], dtype=np.uint8)
                     scales = np.asarray(archive[spec["scale_key"]], dtype=np.float32)
                     value = unpack_quaternary(
-                        packed, scales, math.prod(shape[1:])
+                        packed, scales, math.prod(shape[1:]),
+                        format_version=codebook_version,
                     ).reshape(shape)
                 elif spec["kind"] == "fp16":
                     value = np.asarray(archive[spec["value_key"]], dtype=np.float32)

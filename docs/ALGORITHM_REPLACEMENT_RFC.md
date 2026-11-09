@@ -73,11 +73,13 @@ References:
 - https://github.com/RWKV/RWKV-LM
 - https://huggingface.co/docs/transformers/en/model_doc/rwkv
 
-### Candidate C — BitNet b1.58 ternary quantization (quantization experiment, not the primary architecture)
+### Candidate C — production weight precision is fixed at Q2
 
 The existing Q-Mini Q2 alphabet is `{-2, -1, +1, +2}`; it has no zero code. Thus a weight that is exactly zero cannot remain zero after quantization, and the row-wise scale/threshold choice may produce substantial approximation error. This is not proof that the implementation is mathematically invalid, but it is a serious quantization-quality risk that needs measurement.
 
-BitNet b1.58 is a relevant from-scratch quantization research direction because its weight alphabet is ternary `{-1, 0, +1}`. Hugging Face documents both config-based construction and checkpoint loading for its BitNet model. However, the full documented BitNet language model is an attention-based architecture, so **do not substitute the entire BitNetForCausalLM graph into the attention-free Q-Mini branch**. Evaluate only the ternary quantization/linear-layer ideas as a separate research experiment or branch, ported to the chosen non-attention mixer.
+Q-Mini's production matrix weights must remain exactly two bits per symbol with normalized codebook `{-1.0, -0.5, +0.5, +1.0}`. Ternary, INT4 or any wider weight format is not a production migration path. FP32 master parameters during QAT and FP16/FP32 scale/vector metadata are training/runtime support details; they do not redefine the Q2 matrix-weight codebook.
+
+Ternary/INT4 helper routines may be retained only as isolated mathematical diagnostics. They must not be selected by model config, training, export, checkpoint loading or inference. No external pretrained weights are permitted, and the production architecture remains attention-free.
 
 Recommended order:
 1. establish a non-quantized FP32/BF16 training baseline;

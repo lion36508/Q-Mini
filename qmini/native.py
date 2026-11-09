@@ -70,8 +70,8 @@ class NativeKernel:
             raise ValueError("Packed weight shape does not exactly match activation dimensions.")
         if xs.shape != (x.shape[0],):
             raise ValueError("activation_scales must contain one scale per input row.")
-        if not np.isfinite(ws).all() or np.any(ws <= 0):
-            raise ValueError("weight_scales must be finite and positive.")
+        if not np.isfinite(ws).all() or np.any(ws < 0):
+            raise ValueError("weight_scales must be finite and non-negative.")
         if not np.isfinite(xs).all() or np.any(xs <= 0):
             raise ValueError("activation_scales must be finite and positive.")
         if bias is None:

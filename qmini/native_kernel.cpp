@@ -93,10 +93,10 @@ static int64_t qmini_accumulate_i8_q2(
 #endif
 }
 
-// Packed row layout: four signed quaternary values per byte:
-// 00=-2, 01=-1, 10=+1, 11=+2.
-// The inner product uses integer accumulation; scales and bias are applied once
-// after the accumulator is reduced. ARM builds use NEON when the target supports it.
+// Q2-v2 codebook per symbol: 00=-1.0, 01=-0.5, 10=+0.5, 11=+1.0,
+// each multiplied by the FP32 row scale. The dot product accumulates doubled
+// symbols {-2,-1,+1,+2}; multiplying by half the row scale gives Q2 weights.
+// A zero row scale denotes an all-zero row; ARM builds use NEON when supported.
 QMINI_EXPORT int qmini_linear_i8(
     const int8_t* input,
     const uint8_t* packed_weights,
@@ -123,7 +123,7 @@ QMINI_EXPORT int qmini_linear_i8(
     }
     for (int output_index = 0; output_index < out_features; ++output_index) {
         if (!std::isfinite(weight_scales[output_index]) ||
-            weight_scales[output_index] <= 0.0f) {
+            weight_scales[output_index] < 0.0f) {
             return 4;
         }
         if (bias && !std::isfinite(bias[output_index])) {
@@ -146,7 +146,7 @@ QMINI_EXPORT int qmini_linear_i8(
 
             const float offset = bias ? bias[output_index] : 0.0f;
             const float scaled = static_cast<float>(accumulator) *
-                input_scales[row] * weight_scales[output_index];
+                input_scales[row] * weight_scales[output_index] * 0.5f;
             output[static_cast<std::size_t>(row) *
                 static_cast<std::size_t>(out_features) +
                 static_cast<std::size_t>(output_index)] = scaled + offset;

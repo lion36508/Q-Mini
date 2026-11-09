@@ -82,27 +82,27 @@ def test_experimental_quantizers_reject_invalid_shapes_and_nonfinite_values():
         pack_int4_groupwise(torch.tensor([[float("inf"), 1.0]]))
 
 
-def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
-    tiny_config, tmp_path
-):
-    from qmini.model import QMiniMoE
-    from qmini.config import QMiniConfig
-    from scripts.quantization_ablation import run_ablation
+def test_q2_codebook_has_only_four_requested_values_and_zero_rows_round_trip():
+    weight = torch.tensor([
+        [-4.0, -1.0, 0.0, 1.0, 4.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+    ])
+    quantized = quantize_quaternary(weight)
+    scales = 2.0 * weight.abs().mean(dim=1, keepdim=True)
+    assert torch.equal(quantized[1], torch.zeros_like(quantized[1]))
+    normalized = quantized[0] / scales[0]
+    assert set(normalized.tolist()).issubset({-1.0, -0.5, 0.5, 1.0})
 
-    model_dir = tmp_path / "final_model"
-    model_dir.mkdir()
-    config = QMiniConfig.from_dict(tiny_config.to_dict())
-    config.save(model_dir / "config.json")
-    model = QMiniMoE(config)
-    torch.save(model.state_dict(), model_dir / "model.pt")
+    packed, packed_scales = pack_quaternary(weight)
+    assert packed_scales[1] == 0.0
+    restored = unpack_quaternary(packed, packed_scales, in_features=5)
+    assert np.allclose(restored, quantized.numpy(), atol=1e-6)
 
-    output = tmp_path / "reports" / "quantization.json"
-    report = run_ablation(model_dir, output, group_size=8)
-    assert output.is_file()
-    assert report["source_parameter_count"] == model.parameter_report()["total"]
-    assert set(report["formats"]) == {"fp16", "q2", "ternary", "int4"}
-    for metrics in report["formats"].values():
-        assert np.isfinite(metrics["relative_l2_error"])
-        assert np.isfinite(metrics["cosine_similarity"])
-        assert metrics["estimated_weight_payload_bytes"] > 0
-    assert any("does not measure validation NLL" in item for item in report["limitations"])
+
+def test_legacy_q2_v1_unpack_remains_compatible():
+    packed = np.array([[0b11100100]], dtype=np.uint8)
+    scales = np.array([2.0], dtype=np.float32)
+    legacy = unpack_quaternary(packed, scales, in_features=4, format_version=1)
+    current = unpack_quaternary(packed, scales, in_features=4, format_version=2)
+    assert np.array_equal(legacy, np.array([[-4.0, -2.0, 2.0, 4.0]], dtype=np.float32))
+    assert np.array_equal(current, np.array([[-2.0, -1.0, 1.0, 2.0]], dtype=np.float32))

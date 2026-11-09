@@ -30,11 +30,13 @@ These are **training and product objectives**, not claims that the current rando
 3. **Causal sequence processing.** A token at a future position must never influence an earlier position. The sequence mixer is a left-padded causal 1D depthwise convolution. This is a text-sequence operation, not an image CNN.
 4. **From-scratch training.** Do not silently load or fine-tune third-party pretrained model weights. The tokenizer is trained locally from the selected corpus.
 5. **Sparse expert computation.** Use learned Top-1 routing across the configured feed-forward experts in the current baseline; monitor expert usage rather than assuming specialization.
-6. **Low-bit research path.** Use quaternary weights and INT8 fake-quantized activations with an STE during model training. Clearly distinguish fake quantization, packed storage and true integer inference.
+6. **Strict Q2 model weights.** The production matrix-weight codebook is exactly {-1.0, -0.5, +0.5, +1.0}, packed at two bits per weight. INT8 fake-quantized activations are separate. Clearly distinguish FP32 QAT master weights, Q2 packed storage and actual integer inference.
 7. **Reproducible development.** Version architecture/configuration, test causal behavior, record data provenance, keep evaluation data held out and report actual parameter counts and runtime measurements.
 8. **Free/open-source-first development.** Prefer open-source libraries and local execution. Do not make a paid hosted API or proprietary model service a required dependency.
 
 ## 3. Current architecture baseline
+
+The production matrix-weight format is fixed at Q2 (two bits per symbol) with normalized codebook {-1.0, -0.5, +0.5, +1.0}. See [the Q2 quantization specification](docs/Q2_QUANTIZATION_SPEC.md) for the row-scale, zero-row, archive-version and compatibility contract.
 
 The original compact convolution-only baseline remains available. New hybrid research profiles add a gated diagonal state-space path while preserving the no-Transformer-attention constraint. The 5M and 5B configs are capacity specifications, not trained checkpoints or production-readiness claims.
 
@@ -225,7 +227,7 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 
 - QMINI_MASTER.py — single project entry point.
 - qmini/model.py — causal-convolution MoE model.
-- qmini/quantization.py — STE fake quantization and quaternary packing.
+- qmini/quantization.py — Q2 four-level STE fake quantization and two-bit packing (plus isolated diagnostic helpers).
 - qmini/tokenizer.py, qmini/data.py — local tokenizer and corpus pipeline.
 - qmini/train.py — training, validation and resumable checkpoints.
 - qmini/generate.py — cached autoregressive generation and terminal chat.
@@ -236,7 +238,7 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 - scripts/benchmark.py — repeatable full-forward, streaming prefill and cached autoregressive decode benchmark.
 - configs/ — compact base, 5M, historical 134M, hybrid 152M, 5B capacity and smoke configurations.
 - tests/ — model, causality, quantization, data, training, export and native tests.
-- docs/ — architecture, training, evaluation and project scope.
+- docs/ — architecture, Q2 quantization specification, training, evaluation and project scope.
 - colab/ — Colab training notebook.
 - .github/workflows/ — automated CI.
 

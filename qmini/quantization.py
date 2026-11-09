@@ -5,15 +5,25 @@ import torch
 
 
 def quantize_quaternary(weight: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Row-wise {-2,-1,+1,+2} fake quantization with straight-through gradients."""
+    """Q2 fake quantization with codebook {-1,-0.5,+0.5,+1} and STE.
+
+    Per-row scale is 2 * mean(abs(row)). A nonzero row has no zero symbol:
+    exact-zero entries map deterministically to +0.5 * scale. A fully zero
+    row has scale 0 and therefore remains exactly zero after dequantization.
+    """
     if weight.ndim < 2:
         raise ValueError("Weight tensor must have at least two dimensions.")
-    flat = weight.reshape(weight.shape[0], -1)
-    scale = flat.detach().abs().mean(dim=-1, keepdim=True).clamp_min(eps)
-    magnitude = torch.where(flat.detach().abs() / scale >= 1.5, 2.0, 1.0)
-    sign = torch.where(flat.detach() < 0, -1.0, 1.0)
-    q = (sign * magnitude * scale).reshape_as(weight)
-    return weight + (q - weight).detach()
+    if not torch.isfinite(weight).all():
+        raise ValueError("Q2 quantization rejects non-finite weights.")
+    if not np.isfinite(eps) or eps <= 0:
+        raise ValueError("eps must be finite and positive.")
+    flat = weight.detach().float().reshape(weight.shape[0], -1)
+    row_scales = 2.0 * flat.abs().mean(dim=-1, keepdim=True)
+    safe_scales = row_scales.clamp_min(float(eps))
+    magnitude = torch.where(flat.abs() / safe_scales >= 0.75, 1.0, 0.5)
+    sign = torch.where(flat < 0, -1.0, 1.0)
+    quantized = (sign * magnitude * row_scales).reshape_as(weight).to(weight.dtype)
+    return weight + (quantized - weight).detach()
 
 
 def quantize_int8_per_token(
@@ -38,12 +48,20 @@ def fake_quantize_int8(activation: torch.Tensor, eps: float = 1e-8) -> torch.Ten
 
 
 def pack_quaternary(weight: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
-    """Pack four 2-bit signed quaternary values per byte; return row scales."""
+    """Pack four Q2 symbols per byte and return FP32 row scales.
+
+    Code IDs are 00=-1, 01=-0.5, 10=+0.5, 11=+1. Each decoded normalized
+    symbol is multiplied by 2 * mean(abs(source row)). A fully zero row uses
+    scale 0 and therefore reconstructs as exact zeros.
+    """
     if weight.ndim != 2:
         raise ValueError("Expected a [out_features, in_features] matrix.")
     values = weight.detach().float().cpu().numpy()
-    scales = np.maximum(np.mean(np.abs(values), axis=1), 1e-8).astype(np.float32)
-    magnitude = np.where(np.abs(values) / scales[:, None] >= 1.5, 2, 1)
+    if not np.isfinite(values).all():
+        raise ValueError("Q2 packing rejects non-finite weights.")
+    scales = (2.0 * np.mean(np.abs(values), axis=1)).astype(np.float32)
+    safe_scales = np.maximum(scales, 1e-8)
+    magnitude = np.where(np.abs(values) / safe_scales[:, None] >= 0.75, 2, 1)
     quantized = np.where(values < 0, -magnitude, magnitude).astype(np.int8)
     codes = np.where(
         quantized == -2, 0,
@@ -65,21 +83,31 @@ def unpack_quaternary(
     packed: np.ndarray,
     scales: np.ndarray,
     in_features: int,
+    format_version: int = 2,
 ) -> np.ndarray:
+    """Decode legacy Q2-v1 or current Q2-v2 archives."""
     packed = np.asarray(packed, dtype=np.uint8)
     scales = np.asarray(scales, dtype=np.float32)
     if packed.ndim != 2 or scales.ndim != 1 or packed.shape[0] != scales.shape[0]:
         raise ValueError("Packed matrix and scale dimensions do not match.")
     if in_features < 1 or packed.shape[1] * 4 < in_features:
         raise ValueError("Invalid original input dimension for packed weights.")
+    if not np.isfinite(scales).all() or np.any(scales < 0):
+        raise ValueError("Q2 row scales must be finite and non-negative.")
     codes = np.empty((packed.shape[0], packed.shape[1] * 4), dtype=np.uint8)
     for offset in range(4):
         codes[:, offset::4] = (packed >> (2 * offset)) & 3
-    values = np.select(
+    integer_values = np.select(
         [codes == 0, codes == 1, codes == 2, codes == 3],
         [-2.0, -1.0, 1.0, 2.0],
     ).astype(np.float32)
-    return values[:, :in_features] * scales[:, None]
+    if format_version == 1:
+        multiplier = 1.0
+    elif format_version == 2:
+        multiplier = 0.5
+    else:
+        raise ValueError(f"Unsupported Q2 codebook version: {format_version!r}")
+    return integer_values[:, :in_features] * (scales[:, None] * multiplier)
 
 
 

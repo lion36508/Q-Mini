@@ -1,3 +1,4 @@
+import json
 import numpy as np
 from qmini.export import export_packed_state, reconstruct_packed_state, verify_packed_export
 from qmini.model import QMiniMoE
@@ -9,6 +10,12 @@ def test_packed_export_roundtrip_matches_quaternary_projection(tiny_config, tmp_
     target = export_packed_state(
         model.state_dict(), tiny_config, tmp_path / "model.qmini.npz"
     )
+    with np.load(target, allow_pickle=False) as archive:
+        metadata = json.loads(str(archive["metadata_json"].item()))
+    assert metadata["format"] == "qmini-packed-v2"
+    assert metadata["quaternary_codes"] == {
+        "00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0
+    }
     config, restored = reconstruct_packed_state(target)
     assert config.to_dict() == tiny_config.to_dict()
     original = model.state_dict()
