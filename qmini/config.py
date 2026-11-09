@@ -271,7 +271,7 @@ class QMiniConfig:
         self.validate()
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise ValueError("batch_size must be a positive integer.")
-        activation_width = 2 * self.d_model + self.d_hidden + self.vocab_size
+        activation_width = 3 * self.d_model + self.d_hidden + self.vocab_size
         activation_bytes = activation_width * 4 * batch_size
         fallback_matrix_bytes = self.d_model * self.d_hidden * 4
         return (
