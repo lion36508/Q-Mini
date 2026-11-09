@@ -5,12 +5,22 @@ import torch
 
 
 def quantize_quaternary(weight: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Row-wise {-2,-1,+1,+2} fake quantization with straight-through gradients."""
+    """Q2-v2 fake quantization with {-1,-0.5,+0.5,+1} normalized symbols.
+
+    Each row scale is 2 * mean(abs(original row)). An all-zero row retains
+    scale zero and reconstructs to exact zeros. Non-zero rows use +0.5 for
+    exact-zero entries because the production codebook has no zero symbol.
+    """
     if weight.ndim < 2:
         raise ValueError("Weight tensor must have at least two dimensions.")
+    if not torch.isfinite(weight).all():
+        raise ValueError("Q2 quantization rejects non-finite weights.")
     flat = weight.reshape(weight.shape[0], -1)
-    scale = flat.detach().abs().mean(dim=-1, keepdim=True).clamp_min(eps)
-    magnitude = torch.where(flat.detach().abs() / scale >= 1.5, 2.0, 1.0)
+    scale = 2.0 * flat.detach().abs().mean(dim=-1, keepdim=True)
+    safe_scale = scale.clamp_min(eps)
+    magnitude = torch.where(
+        flat.detach().abs() / safe_scale >= 0.75, 1.0, 0.5
+    )
     sign = torch.where(flat.detach() < 0, -1.0, 1.0)
     q = (sign * magnitude * scale).reshape_as(weight)
     return weight + (q - weight).detach()
@@ -70,19 +80,29 @@ def fake_quantize_int8(activation: torch.Tensor, eps: float = 1e-8) -> torch.Ten
 
 
 def pack_quaternary(weight: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
-    """Pack four 2-bit signed quaternary values per byte; return row scales."""
+    """Pack Q2-v2 normalized symbols: 00=-1, 01=-0.5, 10=+0.5, 11=+1.
+
+    Row scales are exactly 2 * mean(abs(original row)). All-zero rows use
+    scale 0; their symbol bytes are ignored during reconstruction.
+    """
     if weight.ndim != 2:
         raise ValueError("Expected a [out_features, in_features] matrix.")
     values = weight.detach().float().cpu().numpy()
-    scales = np.maximum(np.mean(np.abs(values), axis=1), 1e-8).astype(np.float32)
-    magnitude = np.where(np.abs(values) / scales[:, None] >= 1.5, 2, 1)
-    quantized = np.where(values < 0, -magnitude, magnitude).astype(np.int8)
+    if not np.isfinite(values).all():
+        raise ValueError("Q2 packing rejects non-finite weights.")
+    scales = (2.0 * np.mean(np.abs(values), axis=1)).astype(np.float32)
+    safe_scales = np.where(scales > 0.0, scales, 1.0)
+    magnitude = np.where(
+        np.abs(values) / safe_scales[:, None] >= 0.75, 1.0, 0.5
+    )
+    normalized = np.where(values < 0.0, -magnitude, magnitude)
     codes = np.where(
-        quantized == -2, 0,
-        np.where(quantized == -1, 1, np.where(quantized == 1, 2, 3)),
+        normalized == -1.0, 0,
+        np.where(normalized == -0.5, 1,
+                 np.where(normalized == 0.5, 2, 3)),
     ).astype(np.uint8)
     rows, columns = codes.shape
-    padded = np.zeros((rows, ((columns + 3) // 4) * 4), dtype=np.uint8)
+    padded = np.full((rows, ((columns + 3) // 4) * 4), 2, dtype=np.uint8)
     padded[:, :columns] = codes
     packed = (
         padded[:, 0::4]
@@ -97,22 +117,35 @@ def unpack_quaternary(
     packed: np.ndarray,
     scales: np.ndarray,
     in_features: int,
+    format_version: int = 2,
 ) -> np.ndarray:
-    packed = np.asarray(packed, dtype=np.uint8)
-    scales = np.asarray(scales, dtype=np.float32)
+    """Decode Q2-v1 legacy or Q2-v2 normalized four-symbol row-scaled matrices."""
+    packed = np.asarray(packed)
+    scales = np.asarray(scales)
+    if packed.dtype != np.uint8 or scales.dtype != np.float32:
+        raise TypeError("Q2 payload requires uint8 packed values and float32 row scales.")
     if packed.ndim != 2 or scales.ndim != 1 or packed.shape[0] != scales.shape[0]:
         raise ValueError("Packed matrix and scale dimensions do not match.")
     if in_features < 1 or packed.shape[1] * 4 < in_features:
         raise ValueError("Invalid original input dimension for packed weights.")
+    if not np.isfinite(scales).all():
+        raise ValueError("Q2 row scales must be finite.")
+    if format_version == 1:
+        if np.any(scales <= 0):
+            raise ValueError("Q2-v1 row scales must be positive.")
+        codebook = (-2.0, -1.0, 1.0, 2.0)
+    elif format_version == 2:
+        if np.any(scales < 0):
+            raise ValueError("Q2-v2 row scales must be non-negative.")
+        codebook = (-1.0, -0.5, 0.5, 1.0)
+    else:
+        raise ValueError(f"Unsupported Q2 format version: {format_version!r}.")
+
     codes = np.empty((packed.shape[0], packed.shape[1] * 4), dtype=np.uint8)
     for offset in range(4):
         codes[:, offset::4] = (packed >> (2 * offset)) & 3
-    values = np.select(
-        [codes == 0, codes == 1, codes == 2, codes == 3],
-        [-2.0, -1.0, 1.0, 2.0],
-    ).astype(np.float32)
+    values = np.asarray(codebook, dtype=np.float32)[codes]
     return values[:, :in_features] * scales[:, None]
-
 
 
 def quantize_ternary_rowwise(
