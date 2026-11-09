@@ -16,11 +16,18 @@ def load_model(model_dir: str | Path, device: str | None = None):
     requested_device = torch.device(device) if device is not None else None
     packed_path = root / "model.qmini.npz"
 
-    # Prefer the true packed runtime by default. It leaves 2-bit matrices packed
-    # in RAM instead of constructing the multi-gigabyte FP32 training model.
-    if packed_path.is_file() and (
-        requested_device is None or requested_device.type == "cpu"
-    ):
+    # Prefer the true packed runtime when CPU was requested or when the large
+    # deployment has no dense snapshot. Keep small/GPU research runs on CUDA
+    # when a dense snapshot is available.
+    dense_path = root / "model.pt"
+    use_packed = packed_path.is_file() and (
+        (requested_device is not None and requested_device.type == "cpu")
+        or (
+            requested_device is None
+            and (not torch.cuda.is_available() or not dense_path.is_file())
+        )
+    )
+    if use_packed:
         from .packed_runtime import load_packed_model
         model = load_packed_model(packed_path, expected_config=config)
         target = torch.device("cpu")
@@ -29,7 +36,7 @@ def load_model(model_dir: str | Path, device: str | None = None):
             "cuda" if torch.cuda.is_available() else "cpu"
         )
         model = QMiniMoE(config)
-        weights_path = root / "model.pt"
+        weights_path = dense_path
         if not weights_path.is_file():
             raise FileNotFoundError(
                 f"No compatible weights found. Expected {packed_path} for CPU packed "
