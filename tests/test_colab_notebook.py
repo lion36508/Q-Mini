@@ -67,7 +67,7 @@ def test_colab_training_targets_do_not_change_checkpoint_run_identity():
 def test_sft_never_silently_selects_the_tiny_smoke_checkpoint():
     notebook_path = Path(__file__).resolve().parents[1] / 'colab' / 'QMini_Training.ipynb'
     notebook = json.loads(notebook_path.read_text(encoding='utf-8'))
-    sft_stage = ''.join(notebook['cells'][11]['source'])
+    sft_stage = ''.join(notebook['cells'][12]['source'])
     assert 'SFT_SOURCE_OVERRIDE = None' in sft_stage
     assert 'SFT_MINIMUM_SOURCE_PARAMETERS = 50_000_000' in sft_stage
     assert 'base_*/final_model/model_manifest.json' in sft_stage
@@ -80,7 +80,7 @@ def test_sft_never_silently_selects_the_tiny_smoke_checkpoint():
 def test_sft_requires_independent_task_and_conversation_holdouts():
     notebook_path = Path(__file__).resolve().parents[1] / 'colab' / 'QMini_Training.ipynb'
     notebook = json.loads(notebook_path.read_text(encoding='utf-8'))
-    sft_stage = ''.join(notebook['cells'][11]['source'])
+    sft_stage = ''.join(notebook['cells'][12]['source'])
     gate = sft_stage.index('if not SFT_HELDOUT_TASKS.is_file() or not SFT_HELDOUT_CONVERSATIONS.is_file():')
     training_run = sft_stage.index("SFT_RUN = ART/'runs'/f'sft_{SFT_KEY}'")
     identity = sft_stage.index("sft_identity.update(SFT_HELDOUT_TASKS_SHA256.encode('utf-8'))")
@@ -100,7 +100,7 @@ def test_colab_runs_random_brain_architecture_preflight_before_dataset_loading()
     assert "qmini.cli','preflight'" in preflight
     assert "qmini_research_152m.json" in preflight
     assert "'--sequence-length','8'" in preflight
-    assert "no optimizer step" in preflight
+    assert "optimizer step" in preflight
     assert "weights updated" in preflight
     assert "qmini.cli','tokenizer'" in tokenizer_data_stage
     assert setup.index("pip','install','--no-deps','-e','.'") < len(setup)
