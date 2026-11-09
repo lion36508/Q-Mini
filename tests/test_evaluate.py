@@ -295,7 +295,9 @@ def test_multi_turn_evaluator_reports_whole_turn_eviction_at_context_limit(
     assert report["turns"] == 2
     assert report["cases"][0]["history_turns_dropped_before_turn"] == 0
     assert report["cases"][1]["history_turns_dropped_before_turn"] == 1
-    assert "<|system|>Follow the instruction.<|end|>" in prompts[1]
+    assert prompts[1].startswith(
+        "<|system|>Follow the instruction.\n<|end|>\n"
+    )
     assert "<|user|>old detail" not in prompts[1]
     assert "What was my note?" in prompts[1]
     assert model.training is True
