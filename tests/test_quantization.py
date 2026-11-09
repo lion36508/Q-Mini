@@ -163,3 +163,52 @@ def test_rowwise_int8_quantization_rejects_invalid_weights_and_scales():
         dequantize_int8_rowwise(q, torch.ones(2, dtype=torch.float16))
     with pytest.raises(ValueError, match="finite and positive"):
         dequantize_int8_rowwise(q, torch.tensor([1.0, float("nan")]))
+
+
+
+def test_q2_v2_exact_normalized_codebook_row_scale_and_all_zero_rows():
+    weight = torch.tensor([
+        [-4.0, -1.0, 0.0, 1.0, 4.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    ])
+    packed, scales = pack_quaternary(weight)
+    assert scales.dtype == np.float32
+    assert scales[0] == pytest.approx(2.5)
+    assert scales[1] == 0.0
+
+    codes = np.empty((2, 8), dtype=np.uint8)
+    for offset in range(4):
+        codes[:, offset::4] = (packed >> (2 * offset)) & 3
+    assert codes[0].tolist() == [0, 1, 2, 2, 3, 2, 2, 2]
+    assert codes[1].tolist() == [2] * 8
+
+    restored = unpack_quaternary(packed, scales, in_features=8, format_version=2)
+    expected = np.array([
+        [-2.5, -1.25, 1.25, 1.25, 2.5, 1.25, 1.25, 1.25],
+        [0.0] * 8,
+    ], dtype=np.float32)
+    assert np.array_equal(restored, expected)
+    fake_quantized = quantize_quaternary(weight).detach().numpy()
+    assert np.array_equal(fake_quantized, expected)
+
+
+def test_q2_v1_legacy_decoder_preserves_historical_codebook_and_scales():
+    packed = np.array([[0b11100100, 0b00011011]], dtype=np.uint8)
+    scales = np.array([0.25], dtype=np.float32)
+    actual = unpack_quaternary(
+        packed, scales, in_features=8, format_version=1
+    )
+    expected = np.array([[-0.5, -0.25, 0.25, 0.5, 0.5, 0.25, -0.25, -0.5]])
+    assert np.array_equal(actual, expected.astype(np.float32))
+
+
+def test_q2_decoder_rejects_version_specific_invalid_scales():
+    packed = np.zeros((2, 1), dtype=np.uint8)
+    with pytest.raises(ValueError, match="v1 row scales must be positive"):
+        unpack_quaternary(
+            packed, np.array([0.0, 1.0], dtype=np.float32), 4, format_version=1
+        )
+    with pytest.raises(ValueError, match="v2 row scales must be non-negative"):
+        unpack_quaternary(
+            packed, np.array([-0.1, 1.0], dtype=np.float32), 4, format_version=2
+        )
