@@ -444,12 +444,14 @@ def test_sparse_assistant_masks_always_sample_legal_windows(tmp_path):
         assert torch.all(loss_mask.sum(dim=1) > 0)
         starts = x[:, 0].cpu().numpy().astype(int)
         seen_starts.update(starts.tolist())
-        for start, row_mask in zip(starts, loss_mask.cpu().numpy()):
+        for row_index, (start, row_mask) in enumerate(
+            zip(starts, loss_mask.cpu().numpy())
+        ):
             expected = masks[start + 1:start + seq_len + 1]
             assert np.array_equal(row_mask.astype(np.uint8), expected)
             assert expected.sum() > 0
             assert np.array_equal(
-                y[(starts == start)[0]].cpu().numpy(),
+                y[row_index].cpu().numpy(),
                 tokens[start + 1:start + seq_len + 1].astype(np.int64),
             )
     assert seen_starts == {0, token_count - seq_len - 1}
