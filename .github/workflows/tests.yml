@@ -20,9 +20,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -128,7 +128,7 @@ jobs:
               print(json.dumps(report, indent=2))
           PY
       - name: Upload reproducible CPU reference benchmarks
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmini-cpu-reference-benchmarks
           path: |
@@ -230,7 +230,7 @@ jobs:
               print(json.dumps(report, indent=2))
           PY
       - name: Upload trained Q-Mini CPU benchmarks
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmini-trained-cpu-benchmarks
           path: |
@@ -277,7 +277,7 @@ jobs:
           print("All quantization and evaluation smoke reports validated.")
           PY
       - name: Upload quantization and evaluation smoke reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmini-quality-evaluation-smoke
           path: |
