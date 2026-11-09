@@ -265,6 +265,7 @@ def trim_chat_history(
     *,
     token_prefix: str = "",
     token_suffix: str = "",
+    allow_empty: bool = False,
 ) -> str:
     """Trim whole completed turns from the oldest side without splitting roles.
 
@@ -275,10 +276,13 @@ def trim_chat_history(
     if token_budget < 1:
         raise ValueError("token_budget must be positive.")
     system_prefix, turns = _complete_chat_turns(history, has_control_tokens)
-    if not turns:
-        raise ValueError("No complete user/assistant turn is available to retain.")
-
     prefix = "".join(system_prefix)
+    if not turns:
+        if allow_empty and len(
+            tokenizer.encode(token_prefix + prefix + token_suffix).ids
+        ) <= token_budget:
+            return prefix
+        raise ValueError("No complete user/assistant turn is available to retain.")
     kept: list[str] = []
     for turn in reversed(turns):
         candidate_turns = [turn, *kept]
@@ -289,6 +293,13 @@ def trim_chat_history(
         kept = candidate_turns
 
     if not kept:
+        if allow_empty and len(
+            tokenizer.encode(token_prefix + prefix + token_suffix).ids
+        ) <= token_budget:
+            # The last previous turn cannot coexist with the new turn. Drop
+            # whole prior turns, retain the immutable system prefix and expose
+            # this loss to evaluation callers via the returned history.
+            return prefix
         raise ValueError(
             "The newest complete conversation turn exceeds the safe history budget. "
             "Start a new chat or reduce the message length; role markers were not removed."
@@ -329,6 +340,7 @@ def prepare_chat_prompt(
         has_control_tokens=has_control_tokens,
         token_prefix=memory_context,
         token_suffix=user_block,
+        allow_empty=True,
     )
     prompt = memory_context + trimmed_history + user_block
     if len(tokenizer.encode(prompt).ids) > max_context:
