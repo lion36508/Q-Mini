@@ -251,7 +251,7 @@ def test_multi_turn_evaluator_reports_whole_turn_eviction_at_context_limit(
             "system": "Follow the instruction.",
             "turns": [
                 {
-                    "user": "old detail " * 48,
+                    "user": "old detail " * 24,
                     "reference": "ok",
                     "scorer": "contains",
                 },
