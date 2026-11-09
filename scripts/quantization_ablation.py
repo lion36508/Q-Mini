@@ -23,6 +23,14 @@ from qmini.quantization import (
 )
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _metric_accumulator() -> dict[str, float]:
     return {"reference_sq": 0.0, "error_sq": 0.0, "dot": 0.0, "approx_sq": 0.0, "max_abs": 0.0}
 
@@ -290,11 +298,11 @@ def run_ablation(
         "group_size": group_size,
         "heldout_language_evaluation": heldout_evaluation,
         "evaluation_dataset_sha256": (
-            hashlib.sha256(Path(eval_tokens).read_bytes()).hexdigest()
+            _sha256_path(Path(eval_tokens))
             if eval_tokens is not None else None
         ),
         "evaluation_mask_sha256": (
-            hashlib.sha256(Path(eval_mask).read_bytes()).hexdigest()
+            _sha256_path(Path(eval_mask))
             if eval_mask is not None else None
         ),
         "formats": {
