@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "From-scratch quaternary causal-convolution sparse-MoE language model"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "torch>=2.2", "tokenizers>=0.15"]
+dependencies = ["numpy>=1.24", "torch>=2.10.0", "tokenizers>=0.15"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
@@ -19,6 +19,9 @@ qmini = "qmini.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["qmini*"]
+
+[tool.setuptools.package-data]
+qmini = ["native_kernel.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
