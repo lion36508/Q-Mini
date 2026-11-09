@@ -98,6 +98,96 @@ def _iter_plain(path: Path, chunk_chars: int = 8192) -> Iterator[str]:
         yield "\n".join(buffer)
 
 
+def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[object]:
+    """Incrementally decode a top-level JSON array with bounded input buffering."""
+    decoder = json.JSONDecoder()
+    buffer = ""
+    cursor = 0
+    eof = False
+    expect_value = True
+
+    while True:
+        while cursor >= len(buffer) and not eof:
+            chunk = handle.read(chunk_chars)
+            if chunk:
+                buffer += chunk
+            else:
+                eof = True
+
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+
+        if cursor >= len(buffer):
+            if eof:
+                raise ValueError(f"JSON array in {path} ended before its closing bracket.")
+            if cursor:
+                buffer = buffer[cursor:]
+                cursor = 0
+            continue
+
+        char = buffer[cursor]
+        if expect_value:
+            if char == "]":
+                cursor += 1
+                trailing = buffer[cursor:] + handle.read()
+                if trailing.strip():
+                    raise ValueError(f"Unexpected data after JSON array in {path}.")
+                return
+            try:
+                value, end = decoder.raw_decode(buffer, cursor)
+            except json.JSONDecodeError as exc:
+                if eof:
+                    raise ValueError(
+                        f"Invalid or truncated JSON array in {path} near character {cursor}: {exc.msg}"
+                    ) from exc
+                if cursor:
+                    buffer = buffer[cursor:]
+                    cursor = 0
+                chunk = handle.read(chunk_chars)
+                if chunk:
+                    buffer += chunk
+                else:
+                    eof = True
+                continue
+            yield value
+            cursor = end
+            expect_value = False
+        else:
+            if char == ",":
+                cursor += 1
+                expect_value = True
+            elif char == "]":
+                cursor += 1
+                trailing = buffer[cursor:] + handle.read()
+                if trailing.strip():
+                    raise ValueError(f"Unexpected data after JSON array in {path}.")
+                return
+            else:
+                raise ValueError(
+                    f"Expected ',' or ']' after a JSON value in {path} at character {cursor}."
+                )
+
+        if cursor >= chunk_chars:
+            buffer = buffer[cursor:]
+            cursor = 0
+
+
+def _iter_json_file(path: Path) -> Iterator[object]:
+    with path.open("r", encoding="utf-8-sig") as handle:
+        first_non_whitespace = ""
+        while True:
+            char = handle.read(1)
+            if not char or not char.isspace():
+                first_non_whitespace = char
+                break
+        handle.seek(0)
+        if first_non_whitespace == "[":
+            yield from _iter_json_array(handle, path)
+            return
+        payload = json.load(handle)
+        yield from (payload if isinstance(payload, list) else [payload])
+
+
 def iter_source_records(paths: Iterable[str | Path]) -> Iterator[object]:
     """Yield source records without flattening away chat roles."""
     for path in expand_data_paths(paths):
@@ -105,9 +195,7 @@ def iter_source_records(paths: Iterable[str | Path]) -> Iterator[object]:
         if suffix in {".txt", ".text", ".md", ".markdown"}:
             yield from _iter_plain(path)
         elif suffix == ".json":
-            with path.open("r", encoding="utf-8-sig") as handle:
-                payload = json.load(handle)
-            yield from (payload if isinstance(payload, list) else [payload])
+            yield from _iter_json_file(path)
         elif suffix in {".jsonl", ".ndjson"}:
             with path.open("r", encoding="utf-8-sig") as handle:
                 for line_number, line in enumerate(handle, 1):
@@ -358,15 +446,23 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _file_manifest(paths: list[Path]) -> list[dict[str, object]]:
-    return [
-        {
-            "path": str(path),
+def _file_manifest(
+    paths: list[Path],
+    include_absolute_paths: bool = False,
+) -> list[dict[str, object]]:
+    """Record stable source identity without leaking local directory structure."""
+    result: list[dict[str, object]] = []
+    for index, path in enumerate(paths):
+        entry: dict[str, object] = {
+            "source_index": index,
+            "path": path.name,
             "size_bytes": path.stat().st_size,
             "sha256": _sha256_file(path),
         }
-        for path in paths
-    ]
+        if include_absolute_paths:
+            entry["absolute_path"] = str(path)
+        result.append(entry)
+    return result
 
 
 def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
@@ -388,6 +484,7 @@ def prepare_token_streams(
     output_dir: str | Path,
     valid_fraction: float = 0.02,
     loss_mask_mode: str = "auto",
+    include_absolute_source_paths: bool = False,
 ) -> dict[str, object]:
     """Prepare deduplicated train/validation token and assistant-loss-mask streams.
 
@@ -428,7 +525,7 @@ def prepare_token_streams(
     if vocab_size > 65535:
         raise ValueError("uint16 token streams support vocabulary sizes up to 65,535.")
 
-    source_manifest_before = _file_manifest(paths)
+    source_manifest_before = _file_manifest(paths, include_absolute_source_paths)
     fd, database_name = tempfile.mkstemp(
         prefix=".qmini_dedup_", suffix=".sqlite3", dir=target
     )
@@ -559,7 +656,7 @@ def prepare_token_streams(
                 handle.flush()
                 os.fsync(handle.fileno())
 
-        source_manifest_after = _file_manifest(paths)
+        source_manifest_after = _file_manifest(paths, include_absolute_source_paths)
         if source_manifest_after != source_manifest_before:
             raise RuntimeError("Source files changed while token streams were being prepared.")
         if int(stats["train_tokens"]) == 0 or int(stats["valid_tokens"]) == 0:
@@ -587,6 +684,7 @@ def prepare_token_streams(
             "loss_mask_dtype": "uint8",
             "loss_mask_mode": loss_mask_mode,
             "deduplication": "exact-document-sha256",
+            "absolute_source_paths_included": bool(include_absolute_source_paths),
             "source_files": source_manifest_before,
             "corpus_sha256": hashlib.sha256(corpus_descriptor).hexdigest(),
             "tokenizer_sha256": _sha256_file(tokenizer_path_obj),
