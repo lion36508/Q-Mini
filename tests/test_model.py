@@ -414,3 +414,27 @@ def test_ssm_cuda_mixed_precision_long_scan_has_finite_outputs_and_gradients(dty
         parameter.grad is None or torch.isfinite(parameter.grad).all()
         for parameter in mixer.parameters()
     )
+
+
+
+def test_shared_refinement_parameters_receive_gradients_at_every_step_count(
+    tiny_config,
+):
+    torch.manual_seed(20261109)
+    model = QMiniMoE(tiny_config).train()
+    ids = torch.randint(0, tiny_config.vocab_size, (2, 9))
+
+    for steps in range(1, tiny_config.max_thinking_steps + 1):
+        model.zero_grad(set_to_none=True)
+        result = model(ids, thinking_steps=steps)
+        loss = result["logits"].float().square().mean()
+        loss.backward()
+        gradients = [
+            parameter.grad
+            for parameter in model.refinement.parameters()
+            if parameter.requires_grad
+        ]
+        assert gradients
+        assert all(gradient is not None for gradient in gradients)
+        assert all(torch.isfinite(gradient).all() for gradient in gradients)
+        assert sum(float(gradient.abs().sum()) for gradient in gradients) > 0.0
