@@ -13,15 +13,35 @@ from .tokenizer import load_tokenizer, special_token_id
 def load_model(model_dir: str | Path, device: str | None = None):
     root = Path(model_dir)
     config = QMiniConfig.from_json(root / "config.json")
-    target = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model = QMiniMoE(config)
-    weights_path = root / "model.pt"
-    try:
-        state = torch.load(weights_path, map_location="cpu", weights_only=True)
-    except TypeError:
-        state = torch.load(weights_path, map_location="cpu")
-    model.load_state_dict(state, strict=True)
-    model.to(target).eval()
+    requested_device = torch.device(device) if device is not None else None
+    packed_path = root / "model.qmini.npz"
+
+    # Prefer the true packed runtime by default. It leaves 2-bit matrices packed
+    # in RAM instead of constructing the multi-gigabyte FP32 training model.
+    if packed_path.is_file() and (
+        requested_device is None or requested_device.type == "cpu"
+    ):
+        from .packed_runtime import load_packed_model
+        model = load_packed_model(packed_path, expected_config=config)
+        target = torch.device("cpu")
+    else:
+        target = requested_device or torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        model = QMiniMoE(config)
+        weights_path = root / "model.pt"
+        if not weights_path.is_file():
+            raise FileNotFoundError(
+                f"No compatible weights found. Expected {packed_path} for CPU packed "
+                f"inference or {weights_path} for dense PyTorch inference."
+            )
+        try:
+            state = torch.load(weights_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            state = torch.load(weights_path, map_location="cpu")
+        model.load_state_dict(state, strict=True)
+        model.to(target).eval()
+
     tokenizer = load_tokenizer(root / "tokenizer.json")
     if tokenizer.get_vocab_size() != config.vocab_size:
         raise ValueError(
