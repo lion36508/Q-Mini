@@ -237,6 +237,54 @@ jobs:
             /tmp/qmini-trained-cpu-native.json
             /tmp/qmini-trained-cpu-fallback.json
           if-no-files-found: error
+      - name: Compare quantization formats and exercise structured conversation evaluation
+        run: |
+          python scripts/quantization_ablation.py \
+            --model-dir /tmp/qmini-trained-smoke/run/final_model \
+            --output /tmp/qmini-quantization-quality.json \
+            --group-size 8 \
+            --eval-tokens /tmp/qmini-trained-smoke/valid.bin \
+            --eval-seq-len 8 --eval-batch-size 1 \
+            --eval-batches 2 --eval-seed 731
+          python -m qmini.cli eval-tasks \
+            --model-dir /tmp/qmini-trained-smoke/run/final_model \
+            --dataset evaluation/smoke-tasks-v1.jsonl \
+            --max-new-tokens 8 \
+            --output /tmp/qmini-smoke-tasks.json
+          python -m qmini.cli eval-conversations \
+            --model-dir /tmp/qmini-trained-smoke/run/final_model \
+            --dataset evaluation/smoke-conversations-v1.jsonl \
+            --max-new-tokens 8 \
+            --output /tmp/qmini-smoke-conversations.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          quant = json.loads(Path("/tmp/qmini-quantization-quality.json").read_text())
+          assert set(quant["heldout_language_evaluation"]) == {
+              "fp16", "int8", "q2", "ternary", "int4"
+          }
+          for name, item in quant["heldout_language_evaluation"].items():
+              assert item["supervised_target_tokens"] > 0, name
+              assert item["seed"] == 731, name
+          tasks = json.loads(Path("/tmp/qmini-smoke-tasks.json").read_text())
+          conversations = json.loads(Path("/tmp/qmini-smoke-conversations.json").read_text())
+          assert tasks["examples"] == 10
+          assert tasks["dataset_sha256"]
+          assert conversations["conversations"] == 3
+          assert conversations["turns"] == 6
+          assert conversations["dataset_sha256"]
+          print("All quantization and evaluation smoke reports validated.")
+          PY
+      - name: Upload quantization and evaluation smoke reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmini-quality-evaluation-smoke
+          path: |
+            /tmp/qmini-quantization-quality.json
+            /tmp/qmini-smoke-tasks.json
+            /tmp/qmini-smoke-conversations.json
+          if-no-files-found: error
       - name: Run audit and CLI checks
         run: |
           python -m qmini.cli audit --config configs/qmini_smoke.json
