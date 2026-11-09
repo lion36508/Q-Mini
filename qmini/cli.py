@@ -104,7 +104,10 @@ def main() -> int:
     train.add_argument("--eval-batches", type=int, default=20); train.add_argument("--resume", action="store_true")
     train.add_argument(
         "--init-from",
-        help="initialize a new fine-tuning run from final_model/model.pt; optimizer state is reset",
+        help=(
+            "initialize a new fine-tuning run from final_model/model.pt or "
+            "a packed final_model/model.qmini.npz; optimizer state is reset"
+        ),
     )
     train.add_argument(
         "--train-mask-bin",
