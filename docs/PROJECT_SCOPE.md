@@ -120,7 +120,7 @@ Checkpoint metadata should remain sufficient to reproduce a run: model state, op
 ## 7. Inference and deployment
 
 - PyTorch reference inference is the correctness baseline.
-- Packed quaternary export is a storage format; it is not evidence of native integer execution.
+- Packed Q2-v2 export is an inference artifact; it is not evidence that the entire model graph runs natively or uses integer arithmetic end to end.
 - The C++17 projection primitive is wired into `QLinear` and the tied output projection for CPU evaluation/inference when the shared library is present; the remainder of the model graph still uses PyTorch.
 - The CPU projection kernel now has an AArch64/NEON integer-vector path and scalar fallback; CI cross-compiles the AArch64 shared library. A complete Android ARM64/Termux runtime remains a later deliverable and must also implement embedding, causal convolution, normalization, expert dispatch, output projection and tokenizer compatibility.
 - Native output must be compared to the reference implementation with stated numerical tolerances.
@@ -132,7 +132,7 @@ Checkpoint metadata should remain sufficient to reproduce a run: model state, op
 ### Phase A — Foundation correctness
 - Architecture tests prove no attention/QKV components exist.
 - Causality tests prove future tokens do not change earlier logits.
-- Quaternary packing/unpacking and STE gradient tests pass.
+- Q2-v2 four-symbol packing/unpacking, scale/zero-row, legacy-v1 compatibility and STE gradient tests pass.
 - Router gradients and per-expert assignment counts are verified.
 - Data, tokenizer, checkpoint/resume and export tests pass.
 - CI is green on the current source revision.
