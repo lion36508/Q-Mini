@@ -20,7 +20,7 @@ def test_plain_text_reader_rejects_malformed_utf8_instead_of_replacing_bytes(tmp
     from qmini.data import iter_source_records
 
     source = tmp_path / "malformed.txt"
-    source.write_bytes(b"valid first line\\ninvalid byte: \\xff\\n")
+    source.write_bytes(b"valid first line\ninvalid byte: \xff\n")
 
     with pytest.raises(ValueError, match="Invalid UTF-8.*malformed.txt"):
         list(iter_source_records([source]))
