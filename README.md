@@ -312,6 +312,8 @@ The PyTorch fallback still works without the C++ library, decoding one projectio
 
 The 2-bit representation is aggressive quantization. Its file size does not establish model quality. Compare quantized output against held-out language, maths, logic, instruction-following and multi-turn tests. CPU execution is implemented, but per-device tokens/second, memory peak and thermal behavior require an actual device benchmark.
 
+Q-Mini does not update its neural weights autonomously during chat. Optional SQLite notes are retrieved as external context; they are not neural long-term memory. To incorporate new examples into model weights, export/prepare a curated dataset and run a separate fine-tuning stage with `--init-from`, then evaluate the new checkpoint before deployment.
+
 
 ## 16. 4GB-device planning versus measured support
 
