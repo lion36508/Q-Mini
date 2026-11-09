@@ -319,8 +319,8 @@ The 5B configuration is **5,132,630,288 total parameters** with **852,873,488 un
 
 The current plan estimates:
 - Packed 5B model-weight artifact: **1,294,831,200 bytes**.
-- Persistent CPU stream caches, batch 1: **80,560,128 bytes**.
-- Conservative model-level CPU working set: **1,409,117,792 bytes**.
+- Persistent CPU stream caches, batch 1: **80,527,360 bytes**.
+- Conservative model-level CPU working set: **1,409,085,024 bytes**.
 
 The working-set estimate excludes the Python/PyTorch baseline, allocator fragmentation, OS memory, tokenizer, archive-decompression overlap, and any app process. It is not a measured peak-RSS number. Therefore Q-Mini has a low-file-size packed format and a CPU code path, but **4GB phone support is not yet proven**. Run the trained model benchmark on the exact device and record actual RSS, time-to-first-token, decode tokens/sec, thermals and quality.
 
