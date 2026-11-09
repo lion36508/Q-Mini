@@ -302,7 +302,7 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
 
     text = extract_text(record).strip()
     if not text:
-        return [], False, False
+        return [], False, False, False
     return [(text, True)], False, True, True
 
 
