@@ -198,7 +198,6 @@ class QMiniConfig:
                 shared_projection_factor * d * d
                 + d * self.kernel_size
                 + d * experts
-                + experts
                 + 2 * experts * d * h
             )
         )
