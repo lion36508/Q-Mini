@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -236,6 +237,206 @@ def iter_text_records(paths: Iterable[str | Path]) -> Iterator[str]:
         text = extract_text(record).strip()
         if text:
             yield text
+
+
+def _validate_near_duplicate_distance(distance: int) -> None:
+    if isinstance(distance, bool) or not isinstance(distance, int) or not 0 <= distance <= 3:
+        raise ValueError("near_duplicate_distance must be an integer from 0 to 3.")
+
+
+def _simhash64(text: str) -> bytes:
+    """Create a deterministic 64-bit SimHash from word trigrams."""
+    tokens = re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
+    if not tokens:
+        tokens = [text.casefold()]
+    if len(tokens) < 3:
+        shingles = [" ".join(tokens)]
+    else:
+        shingles = [
+            " ".join(tokens[index:index + 3])
+            for index in range(len(tokens) - 2)
+        ]
+
+    votes = [0] * 64
+    for shingle in set(shingles):
+        digest = hashlib.blake2b(
+            shingle.encode("utf-8", errors="replace"), digest_size=8
+        ).digest()
+        value = int.from_bytes(digest, "big")
+        for bit in range(64):
+            votes[bit] += 1 if value & (1 << bit) else -1
+    signature = sum(1 << bit for bit, vote in enumerate(votes) if vote >= 0)
+    return signature.to_bytes(8, "big")
+
+
+def _create_document_group_index(connection: sqlite3.Connection, distance: int) -> None:
+    _validate_near_duplicate_distance(distance)
+    connection.execute("CREATE TABLE documents (digest BLOB PRIMARY KEY, simhash BLOB)")
+    connection.execute(
+        "CREATE TABLE document_groups (digest BLOB PRIMARY KEY, parent BLOB NOT NULL)"
+    )
+    if distance:
+        connection.execute(
+            "CREATE TABLE simhash_bands (band_index INTEGER, band_value INTEGER, digest BLOB, "
+            "PRIMARY KEY (band_index, band_value, digest))"
+        )
+        connection.execute(
+            "CREATE INDEX simhash_band_lookup ON simhash_bands(band_index, band_value)"
+        )
+
+
+def _find_document_group_root(connection: sqlite3.Connection, digest: bytes) -> bytes:
+    current = digest
+    path: list[bytes] = []
+    while True:
+        row = connection.execute(
+            "SELECT parent FROM document_groups WHERE digest=?", (current,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("A document is missing from the duplicate-group index.")
+        parent = bytes(row[0])
+        if parent == current:
+            root = current
+            break
+        path.append(current)
+        current = parent
+    for member in path:
+        connection.execute(
+            "UPDATE document_groups SET parent=? WHERE digest=?", (root, member)
+        )
+    return root
+
+
+def _union_document_groups(
+    connection: sqlite3.Connection,
+    first: bytes,
+    second: bytes,
+) -> None:
+    root_a = _find_document_group_root(connection, first)
+    root_b = _find_document_group_root(connection, second)
+    if root_a == root_b:
+        return
+    parent, child = sorted((root_a, root_b))
+    connection.execute(
+        "UPDATE document_groups SET parent=? WHERE digest=?", (parent, child)
+    )
+
+
+def _register_document(
+    connection: sqlite3.Connection,
+    normalized_text: str,
+    near_duplicate_distance: int,
+) -> tuple[bytes, bool]:
+    digest = hashlib.sha256(
+        normalized_text.encode("utf-8", errors="replace")
+    ).digest()
+    signature = _simhash64(normalized_text) if near_duplicate_distance else None
+    cursor = connection.execute(
+        "INSERT OR IGNORE INTO documents(digest, simhash) VALUES (?, ?)",
+        (digest, signature),
+    )
+    if cursor.rowcount == 0:
+        return digest, False
+
+    connection.execute(
+        "INSERT INTO document_groups(digest, parent) VALUES (?, ?)",
+        (digest, digest),
+    )
+    if not near_duplicate_distance:
+        return digest, True
+
+    signature_value = int.from_bytes(signature, "big")
+    candidates: set[bytes] = set()
+    # Four 16-bit LSH bands guarantee that two signatures at Hamming distance
+    # <= 3 share at least one band (the three changed bits can affect at most
+    # three of the four bands).
+    for band_index in range(4):
+        band_value = (signature_value >> (band_index * 16)) & 0xFFFF
+        rows = connection.execute(
+            "SELECT digest FROM simhash_bands WHERE band_index=? AND band_value=?",
+            (band_index, band_value),
+        ).fetchall()
+        candidates.update(bytes(row[0]) for row in rows)
+
+    for candidate in candidates:
+        row = connection.execute(
+            "SELECT simhash FROM documents WHERE digest=?", (candidate,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            continue
+        existing_value = int.from_bytes(bytes(row[0]), "big")
+        if (signature_value ^ existing_value).bit_count() <= near_duplicate_distance:
+            _union_document_groups(connection, digest, candidate)
+
+    for band_index in range(4):
+        band_value = (signature_value >> (band_index * 16)) & 0xFFFF
+        connection.execute(
+            "INSERT INTO simhash_bands(band_index, band_value, digest) VALUES (?, ?, ?)",
+            (band_index, band_value, digest),
+        )
+    return digest, True
+
+
+def _finalize_document_group_splits(
+    connection: sqlite3.Connection,
+    valid_fraction: float,
+) -> dict[str, int]:
+    connection.execute(
+        "CREATE TABLE group_splits (root BLOB PRIMARY KEY, is_valid INTEGER NOT NULL)"
+    )
+    for (digest_value,) in connection.execute("SELECT digest FROM documents"):
+        root = _find_document_group_root(connection, bytes(digest_value))
+        score = int.from_bytes(root[:8], "big") / (2**64)
+        connection.execute(
+            "INSERT OR IGNORE INTO group_splits(root, is_valid) VALUES (?, ?)",
+            (root, int(score < valid_fraction)),
+        )
+
+    group_count = int(connection.execute(
+        "SELECT COUNT(*) FROM group_splits"
+    ).fetchone()[0])
+    if group_count < 2:
+        raise ValueError(
+            "Near-duplicate grouping left fewer than two independent document groups. "
+            "Lower --near-duplicate-distance or add more distinct documents."
+        )
+    valid_count = int(connection.execute(
+        "SELECT COUNT(*) FROM group_splits WHERE is_valid=1"
+    ).fetchone()[0])
+    if valid_count == 0:
+        chosen = connection.execute(
+            "SELECT root FROM group_splits ORDER BY root LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE group_splits SET is_valid=1 WHERE root=?", (chosen,)
+        )
+    elif valid_count == group_count:
+        chosen = connection.execute(
+            "SELECT root FROM group_splits ORDER BY root DESC LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE group_splits SET is_valid=0 WHERE root=?", (chosen,)
+        )
+    connection.commit()
+    return {
+        "groups": group_count,
+        "valid_groups": int(connection.execute(
+            "SELECT COUNT(*) FROM group_splits WHERE is_valid=1"
+        ).fetchone()[0]),
+    }
+
+
+def _document_is_validation(
+    connection: sqlite3.Connection,
+    digest: bytes,
+) -> bool:
+    root = _find_document_group_root(connection, digest)
+    row = connection.execute(
+        "SELECT is_valid FROM group_splits WHERE root=?", (root,)
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("A source document has no deterministic train/validation group.")
+    return bool(row[0])
 
 
 def iter_training_text_records(
