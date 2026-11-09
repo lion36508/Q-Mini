@@ -81,20 +81,34 @@ def extract_text(record: object) -> str:
 
 
 def _iter_plain(path: Path, chunk_chars: int = 8192) -> Iterator[str]:
+    """Yield bounded plain-text chunks, rejecting malformed UTF-8.
+
+    Silently replacing invalid bytes changes the training corpus while making
+    the resulting dataset appear valid. Require callers to repair or explicitly
+    convert malformed source files before tokenizer fitting or preparation.
+    """
+    if chunk_chars < 1:
+        raise ValueError("chunk_chars must be positive.")
     buffer: list[str] = []
     size = 0
-    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
-        for line in handle:
-            if not line.strip():
-                if buffer:
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="strict") as handle:
+            for line in handle:
+                if not line.strip():
+                    if buffer:
+                        yield "\n".join(buffer)
+                        buffer, size = [], 0
+                    continue
+                buffer.append(line.rstrip())
+                size += len(line)
+                if size >= chunk_chars:
                     yield "\n".join(buffer)
                     buffer, size = [], 0
-                continue
-            buffer.append(line.rstrip())
-            size += len(line)
-            if size >= chunk_chars:
-                yield "\n".join(buffer)
-                buffer, size = [], 0
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Invalid UTF-8 in plain-text dataset {path}; repair or explicitly "
+            "transcode the source file before training."
+        ) from exc
     if buffer:
         yield "\n".join(buffer)
 
