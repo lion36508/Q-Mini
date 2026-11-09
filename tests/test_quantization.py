@@ -80,3 +80,29 @@ def test_experimental_quantizers_reject_invalid_shapes_and_nonfinite_values():
         pack_ternary(torch.tensor([[float("nan"), 1.0]]))
     with pytest.raises(ValueError, match="non-finite"):
         pack_int4_groupwise(torch.tensor([[float("inf"), 1.0]]))
+
+
+def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
+    tiny_config, tmp_path
+):
+    from qmini.model import QMiniMoE
+    from qmini.config import QMiniConfig
+    from scripts.quantization_ablation import run_ablation
+
+    model_dir = tmp_path / "final_model"
+    model_dir.mkdir()
+    config = QMiniConfig.from_dict(tiny_config.to_dict())
+    config.save(model_dir / "config.json")
+    model = QMiniMoE(config)
+    torch.save(model.state_dict(), model_dir / "model.pt")
+
+    output = tmp_path / "reports" / "quantization.json"
+    report = run_ablation(model_dir, output, group_size=8)
+    assert output.is_file()
+    assert report["source_parameter_count"] == model.parameter_report()["total"]
+    assert set(report["formats"]) == {"fp16", "q2", "ternary", "int4"}
+    for metrics in report["formats"].values():
+        assert np.isfinite(metrics["relative_l2_error"])
+        assert np.isfinite(metrics["cosine_similarity"])
+        assert metrics["estimated_weight_payload_bytes"] > 0
+    assert any("does not measure validation NLL" in item for item in report["limitations"])
