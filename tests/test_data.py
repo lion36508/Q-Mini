@@ -16,6 +16,25 @@ def test_extract_chat_messages():
     assert "Gravity attracts masses." in text
 
 
+def test_plain_text_reader_rejects_malformed_utf8_instead_of_replacing_bytes(tmp_path):
+    from qmini.data import iter_source_records
+
+    source = tmp_path / "malformed.txt"
+    source.write_bytes(b"valid first line\\ninvalid byte: \\xff\\n")
+
+    with pytest.raises(ValueError, match="Invalid UTF-8.*malformed.txt"):
+        list(iter_source_records([source]))
+
+
+def test_plain_text_reader_rejects_invalid_chunk_size(tmp_path):
+    from qmini.data import _iter_plain
+
+    source = tmp_path / "plain.txt"
+    source.write_text("valid text", encoding="utf-8")
+    with pytest.raises(ValueError, match="chunk_chars must be positive"):
+        list(_iter_plain(source, chunk_chars=0))
+
+
 def test_jsonl_and_plain_text_readers(tmp_path):
     jsonl = tmp_path / "chat.jsonl"
     jsonl.write_text(
