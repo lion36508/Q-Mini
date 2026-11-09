@@ -185,7 +185,11 @@ def _evaluate(
         raise ValueError("Validation run contains no supervised target tokens.")
     mean_loss = total_negative_log_likelihood / total_supervised_targets
     perplexity = math.exp(mean_loss) if mean_loss < 709.0 else None
-    return {"eval_loss": mean_loss, "eval_perplexity": perplexity}
+    return {
+        "eval_loss": mean_loss,
+        "eval_perplexity": perplexity,
+        "eval_supervised_tokens": int(total_supervised_targets),
+    }
 
 
 def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
