@@ -132,7 +132,12 @@ class QMiniConfig:
     def _block_parameter_counts(self) -> tuple[int, int]:
         """Return (full block parameters, one expert's parameters)."""
         d, h, experts = self.d_model, self.d_hidden, self.n_experts
-        shared = 3 * d * d + 7 * d + d * self.kernel_size + d * experts + experts
+        router_parameters = d * experts + experts if experts > 1 else 0
+        router_norm_parameters = d if experts > 1 else 0
+        shared = (
+            3 * d * d + 6 * d + d * self.kernel_size
+            + router_norm_parameters + router_parameters
+        )
         if self.use_state_space:
             # Four QLinear projections plus the state-space RMSNorm.
             shared += 4 * d * d + 5 * d
@@ -197,7 +202,7 @@ class QMiniConfig:
             + blocks * (
                 shared_projection_factor * d * d
                 + d * self.kernel_size
-                + d * experts
+                + (d * experts if experts > 1 else 0)
                 + 2 * experts * d * h
             )
         )
@@ -210,7 +215,7 @@ class QMiniConfig:
             + blocks * (
                 shared_projection_factor * d * ceil4(d)
                 + d * ceil4(self.kernel_size)
-                + experts * ceil4(d)
+                + (experts * ceil4(d) if experts > 1 else 0)
                 + experts * (
                     h * ceil4(d)
                     + d * ceil4(h)
@@ -220,7 +225,9 @@ class QMiniConfig:
         # Depthwise convolution is a separate Q2 matrix with one row
         # per channel, in addition to the dense projection rows.
         q2_row_count = vocab + blocks * (
-            (shared_projection_factor + 1) * d + experts * (h + d + 1)
+            (shared_projection_factor + 1) * d
+            + experts * (h + d)
+            + (experts if experts > 1 else 0)
         )
         row_scale_bytes = q2_row_count * 4
         fp16_vector_bytes = vector_parameters * 2
