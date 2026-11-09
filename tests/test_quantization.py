@@ -212,3 +212,17 @@ def test_q2_decoder_rejects_version_specific_invalid_scales():
         unpack_quaternary(
             packed, np.array([-0.1, 1.0], dtype=np.float32), 4, format_version=2
         )
+
+
+
+def test_q2_v2_pack_and_qat_agree_for_tiny_nonzero_rows():
+    weight = torch.tensor([
+        [1e-12, -1e-12, 0.0, 2e-12],
+        [0.0, 0.0, 0.0, 0.0],
+    ])
+    packed, scales = pack_quaternary(weight)
+    restored = unpack_quaternary(packed, scales, 4, format_version=2)
+    fake = quantize_quaternary(weight).detach().numpy()
+    assert scales[0] > 0.0
+    assert scales[1] == 0.0
+    assert np.array_equal(restored, fake)
