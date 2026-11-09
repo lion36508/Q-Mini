@@ -274,3 +274,71 @@ def test_json_object_reader_and_private_source_manifest_paths(tmp_path):
     )
     assert explicit["source_files"][0]["absolute_path"] == str(source.resolve())
     assert explicit["absolute_source_paths_included"] is True
+
+
+def test_simhash_near_duplicates_stay_in_same_train_validation_split(tmp_path):
+    from qmini.data import _simhash64
+
+    near_a = "The red fox quickly jumps over the small brown fence near the river."
+    near_b = "The red fox quickly jumps over the small brown fence near the river!"
+    assert near_a != near_b
+    assert _simhash64(near_a) == _simhash64(near_b)
+
+    rows = [
+        {"text": near_a},
+        {"text": near_b},
+        {"text": "Astronomers detected a distant galaxy with a powerful radio telescope."},
+        {"text": "Marine biologists studied coral reefs in the warm tropical ocean."},
+        {"text": "Engineers designed a lightweight bridge using strong composite materials."},
+        {"text": "Botanists measured how desert plants conserve water during long dry seasons."},
+    ]
+    corpus = tmp_path / "near-duplicates.jsonl"
+    corpus.write_text(
+        "\n".join(json.dumps(row) for row in rows),
+        encoding="utf-8",
+    )
+    tokenizer_path = tmp_path / "near-duplicate-tokenizer.json"
+    tokenizer = train_tokenizer(
+        [corpus],
+        tokenizer_path,
+        vocab_size=320,
+        min_frequency=1,
+        validation_fraction=0.25,
+        near_duplicate_distance=3,
+    )
+
+    output = tmp_path / "near-duplicate-streams"
+    report = prepare_token_streams(
+        [corpus],
+        tokenizer_path,
+        output,
+        valid_fraction=0.25,
+        loss_mask_mode="all",
+        near_duplicate_distance=3,
+    )
+    assert report["unique_documents"] == 6
+    assert report["near_duplicate_groups"] == 5
+    assert report["near_duplicate_documents_grouped"] == 1
+    assert report["near_duplicate_hamming_distance"] == 3
+    assert report["deduplication"] == "exact-document-sha256+simhash64"
+
+    split_texts = {}
+    for split in ("train", "valid"):
+        token_ids = np.fromfile(output / f"{split}.bin", dtype=np.uint16)
+        split_texts[split] = tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
+
+    appearances = {
+        split: ("red fox quickly jumps over the small brown fence" in text)
+        for split, text in split_texts.items()
+    }
+    assert sum(appearances.values()) == 1, "Near-duplicate documents leaked across splits"
+
+
+def test_near_duplicate_distance_validation_is_strict():
+    from qmini.data import _validate_near_duplicate_distance
+
+    for distance in (0, 1, 2, 3):
+        _validate_near_duplicate_distance(distance)
+    for distance in (-1, 4, 1.5, True):
+        with pytest.raises(ValueError, match="0 to 3"):
+            _validate_near_duplicate_distance(distance)
