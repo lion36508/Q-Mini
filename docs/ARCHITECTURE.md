@@ -21,11 +21,11 @@ Token IDs
   -> next-token logits
 ```
 
-No Transformer attention, Q/K/V, dot-product sequence mixing or retrieval-attention modules are present. The only sequence mixer is causal left-padded depthwise convolution. Router and expert operations are token-local.
+No Transformer attention, Q/K/V or dot-product attention modules are present. Legacy profiles use left-padded causal depthwise convolution only. New hybrid profiles combine that convolution with a gated diagonal state-space recurrence. Router and expert operations remain token-local.
 
-## Causality and receptive field
+## Causality and memory
 
-Each convolution is padded only on the left by `dilation * (kernel_size - 1)`. No future token can affect an earlier output. Main-block receptive field is `1 + (kernel_size - 1) * sum(dilations)`. With kernel size 10 and dilations 1, 2, 4, 8, 16 and 32, it is 568 tokens; default context is 512.
+Each convolution is padded only on the left by `dilation * (kernel_size - 1)`. No future token can affect an earlier output. The convolution path has a finite receptive field of `1 + (kernel_size - 1) * sum(dilations)`. Hybrid profiles additionally maintain a fixed-width learned recurrent state, updated as `s[t] = a[t] * s[t-1] + (1-a[t]) * u[t]`. Training uses a differentiable parallel associative scan; token-by-token generation uses the equivalent recurrent update. This state compresses prior information and cannot guarantee exact retrieval of arbitrary earlier text.
 
 ## Quantization
 
@@ -54,3 +54,12 @@ The qmini/memory.py module provides an optional local SQLite store. FTS5 indexes
 The compact baseline is preserved in configs/qmini_base.json. For GPU training, configs/qmini_research_134m.json supplies width 640, expert hidden width 1,024, ten causal blocks, eight Top-1 experts per block, an 8,192-token target vocabulary and a 2,048-token configured context. The dilation schedule is 1, 2, 4, 8, 16, 32, 64, 128, 256 and 512.
 
 For the full 8,192-token vocabulary, the instantiated shape contains 134,426,200 parameters, including one shared refinement block. The CI audit computes this value from actual PyTorch parameter tensors. If tokenizer training produces fewer than 8,192 entries, the active config and model parameter count are adjusted to that actual vocabulary.
+
+
+## Hybrid profile and resource limits
+
+`configs/qmini_research_152m.json` contains 152,483,800 parameters at its full 8,192-token vocabulary. The state-space block is inserted in every main block and in the shared refinement block. Top-1 routing means only one expert per block processes a token, but all experts remain part of the stored model and optimizer state.
+
+`configs/qmini_5m.json` contains 5,245,996 parameters. `configs/qmini_5b.json` contains 5,132,630,288 parameters. Use `python -m qmini.cli plan --config configs/qmini_5b.json` to inspect it without allocating a 5B model.
+
+The 5B FP32 parameter, gradient and two AdamW moment arrays require about 82.1 GB before activations and runtime overhead. FSDP/ZeRO and expert/tensor parallel execution are not implemented, so the 5B config is not yet an executable H100 distributed-training setup.
