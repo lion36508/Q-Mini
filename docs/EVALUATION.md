@@ -140,3 +140,6 @@ The benchmark set must remain held out from tokenizer fitting, pretraining and S
 All new exports use Q2-v2 normalized symbols {-1,-0.5,+0.5,+1}, with FP32 row scale 2 * mean(abs(original row)); an all-zero matrix row has scale zero. The packed runtime, Python fallback, depthwise convolution and native C++ ABI carry an explicit format version. Legacy Q2-v1 exports continue to decode under their original {-2,-1,+1,+2} table. The exact normative codebook, metadata and scale invariants are in docs/Q2_QUANTIZATION_SPEC.md.
 
 Ternary/INT4/INT8 weight quantizers remain experimental ablation methods and are not production exporter formats.
+
+
+When running quantization ablations, optionally pass `--eval-tokens` (and `--eval-mask` for assistant-only targets) plus a fixed sequence length, batch count and seed. The tool evaluates FP16, INT8, Q2-v2, ternary and INT4 candidate weights against the exact same held-out token stream while keeping the INT8 activation path fixed. The default evaluation cap is 10M parameters to bound host-memory use from candidate state copies; raise it only on a machine with enough RAM. The report records the evaluation stream/mask hashes, token-weighted NLL and perplexity per format. This is still a language-model metric, not a semantic assistant-quality score.
