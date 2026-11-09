@@ -17,6 +17,7 @@ def run(command: list[str]) -> int:
 def usage() -> None:
     print("Q-MINI MASTER")
     print("  python QMINI_MASTER.py audit [--config configs/qmini_base.json]")
+    print("  python QMINI_MASTER.py plan --config configs/qmini_5b.json")
     print("  python QMINI_MASTER.py verify")
     print("  python QMINI_MASTER.py kernel")
     print("  python QMINI_MASTER.py tokenizer ...")
