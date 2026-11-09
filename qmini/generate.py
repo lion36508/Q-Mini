@@ -288,6 +288,47 @@ def trim_chat_history(
     return prefix + "".join(kept)
 
 
+def prepare_chat_prompt(
+    history: str,
+    user_block: str,
+    memory_context: str,
+    tokenizer,
+    max_context: int,
+    has_control_tokens: bool = True,
+) -> tuple[str, str]:
+    """Fit a new user turn without cutting prior turns or role/control markers."""
+    if max_context < 1:
+        raise ValueError("max_context must be positive.")
+    prompt = memory_context + history + user_block
+    if len(tokenizer.encode(prompt).ids) <= max_context:
+        return history, prompt
+
+    reserved_tokens = len(tokenizer.encode(memory_context + user_block).ids)
+    history_budget = max_context - reserved_tokens
+    if history_budget < 1:
+        raise ValueError(
+            "The current user message and saved context exceed max_context by themselves. "
+            "Shorten this message or remove some saved notes."
+        )
+    if not history:
+        raise ValueError(
+            "The current user message exceeds max_context; prior history is empty."
+        )
+
+    trimmed_history = trim_chat_history(
+        history,
+        tokenizer,
+        token_budget=history_budget,
+        has_control_tokens=has_control_tokens,
+    )
+    prompt = memory_context + trimmed_history + user_block
+    if len(tokenizer.encode(prompt).ids) > max_context:
+        raise ValueError(
+            "The current turn cannot fit within max_context after complete-turn trimming."
+        )
+    return trimmed_history, prompt
+
+
 def interactive_chat(
     model_dir: str | Path,
     max_new_tokens: int = 160,
@@ -386,12 +427,27 @@ def interactive_chat(
                     )
                 print("Using local memory:", ", ".join(f"#{item['id']}" for item in matches))
 
-        if has_control_tokens:
-            history += f"<|user|>{user_text}\n<|end|>\n<|assistant|>"
-        else:
-            history += f"[USER]\n{user_text}\n[ASSISTANT]\n"
+        user_block = (
+            f"<|user|>{user_text}\n<|end|>\n<|assistant|>"
+            if has_control_tokens
+            else f"[USER]\n{user_text}\n[ASSISTANT]\n"
+        )
+        try:
+            history, prompt = prepare_chat_prompt(
+                history,
+                user_block,
+                memory_context,
+                tokenizer,
+                model.config.max_context,
+                has_control_tokens=has_control_tokens,
+            )
+        except ValueError as exc:
+            print(f"Cannot fit this turn without damaging chat structure: {exc}")
+            print("Shorten the message or start a new chat.")
+            continue
+        history += user_block
         answer = generate(
-            model, tokenizer, memory_context + history,
+            model, tokenizer, prompt,
             max_new_tokens=max_new_tokens,
         )
         print("Q-Mini: " + answer)
