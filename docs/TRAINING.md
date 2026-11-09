@@ -58,3 +58,19 @@ Periodic \`eval_loss\` is the global token-weighted cross-entropy over all sampl
 \`eval_loss = sum(masked per-token NLL) / sum(supervised target tokens)\`.
 
 For assistant-only datasets, context tokens do not contribute to the numerator or denominator. The \`eval_supervised_tokens\` field records the denominator. \`eval_perplexity\` is \`exp(eval_loss)\` when representable. This matches standalone \`eval-lm\` and avoids bias from an unweighted arithmetic mean of batch means with unequal response lengths.
+
+
+
+## Colab learning proof and optional own-checkpoint SFT
+
+\`colab/QMini_Training.ipynb\` now defaults to a **50-step small-model smoke run**. It measures held-out token-weighted NLL on a fixed evaluation seed before and after training and records a \`learning_proof_*.json\` file in Drive. A long 152M research run is disabled until the user explicitly sets \`RUN_LONG_TRAINING = True\`; it is capped by \`LONG_MAX_OPTIMIZER_STEPS\`, reports the actual token budget/corpus passes and resumes from a hash-keyed Drive checkpoint. The 5B configuration is not a Colab training target.
+
+The optional SFT stage is disabled by default (\`RUN_OWN_CHECKPOINT_SFT = False\`). Put a separate licensed chat/instruction corpus under \`MyDrive/QMini/artifacts/sft_datasets/\`, with rows containing \`messages\` or supported instruction/answer fields, then set the flag to \`True\`. The notebook:
+1. Uses the matching tokenizer/config from a Q-Mini-produced checkpoint.
+2. Prepares a separate SFT dataset with assistant-only loss masks and a held-out split.
+3. Initializes only from the Q-Mini model's packed \`model.qmini.npz\` artifact via \`--init-from\`; no external model weights are accepted and the new optimizer is fresh.
+4. Resumes to a new hash-keyed run directory on Drive.
+5. Optionally compares the SFT checkpoint with its pre-SFT source on the separate \`sft-heldout-tasks.jsonl\` file, reporting task-pass-rate and per-language changes.
+
+An NLL decrease or task-score increase on a small sample is evidence only for that run and dataset. Review sample counts and cases; do not generalize it to broad assistant capability.
+
