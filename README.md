@@ -350,3 +350,10 @@ The notebook now defaults to a small, reproducible learning-proof run: fixed-see
 
 \`scripts/quantization_ablation.py\` compares Q2, zero-preserving ternary and groupwise INT4 reconstruction against FP16 using either a Q-Mini final model or the Q-Mini run's own \`latest.pt\`. This is a weight-error experiment only; the Q2 production format remains unchanged until full held-out NLL, task quality, memory and speed comparisons are measured.
 
+
+
+## Production Q2-v2 format contract
+
+New packed model exports use **Q2-v2**: normalized matrix symbols {-1.0, -0.5, +0.5, +1.0} with codes 00, 01, 10, 11 respectively and an FP32 row scale equal to 2 * mean(abs(original_output_row)). An all-zero row uses scale zero and reconstructs exactly to zero; exact zeros within a non-zero row map to the positive half-symbol because the four-symbol production alphabet has no zero code. Activations remain INT8, while biases and one-dimensional metadata vectors remain FP16 in packed archives.
+
+Existing Q2-v1 archives ({-2,-1,+1,+2} with legacy scales) remain readable. New exports never write v1. The native C++ projection uses a versioned Q2-v2 ABI and applies the same decode/scaling rule as the Python fallback. See docs/Q2_QUANTIZATION_SPEC.md for the normative contract and tests.
