@@ -311,6 +311,17 @@ class QMiniMoE(nn.Module):
         ):
             raise TypeError("input_ids must use an integer tensor dtype; implicit float-to-ID casts are refused.")
 
+    def _resolve_thinking_steps(self, thinking_steps: int | None) -> int:
+        if thinking_steps is None:
+            steps = self.config.thinking_steps
+        else:
+            if isinstance(thinking_steps, bool) or not isinstance(thinking_steps, int):
+                raise TypeError("thinking_steps must be an integer.")
+            steps = thinking_steps
+        if not 1 <= steps <= self.config.max_thinking_steps:
+            raise ValueError(f"thinking_steps must be 1..{self.config.max_thinking_steps}.")
+        return steps
+
     def forward(self, input_ids: torch.Tensor, thinking_steps: int | None = None) -> dict[str, Any]:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
@@ -324,9 +335,7 @@ class QMiniMoE(nn.Module):
         ):
             raise ValueError("input_ids contain token IDs outside the configured vocabulary.")
 
-        steps = self.config.thinking_steps if thinking_steps is None else int(thinking_steps)
-        if not 1 <= steps <= self.config.max_thinking_steps:
-            raise ValueError(f"thinking_steps must be 1..{self.config.max_thinking_steps}.")
+        steps = self._resolve_thinking_steps(thinking_steps)
 
         x = self.embedding(input_ids.long())
         aux_losses: list[torch.Tensor] = []
@@ -387,8 +396,12 @@ class QMiniMoE(nn.Module):
             state = self.new_stream_state(input_ids.shape[0], thinking_steps)
         elif state.batch_size != input_ids.shape[0]:
             raise ValueError("Streaming state batch size does not match input.")
-        elif thinking_steps is not None and int(thinking_steps) != state.thinking_steps:
-            raise ValueError("thinking_steps cannot change in the middle of a stream.")
+        else:
+            configured_steps = self._resolve_thinking_steps(state.thinking_steps)
+            if thinking_steps is not None:
+                requested_steps = self._resolve_thinking_steps(thinking_steps)
+                if requested_steps != configured_steps:
+                    raise ValueError("thinking_steps cannot change in the middle of a stream.")
         if len(state.caches) != self.config.n_layers + state.thinking_steps:
             raise ValueError("Streaming state does not match this model configuration.")
 
