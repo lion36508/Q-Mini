@@ -85,12 +85,19 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=20, help="Measured iterations or decode tokens.")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--thinking-steps", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mode", choices=("forward", "decode", "both"), default="both")
     parser.add_argument("--output", default=None, help="optional JSON path for this measured report")
     args = parser.parse_args()
 
     if args.batch_size < 1 or args.iterations < 1 or args.warmup < 0:
         raise SystemExit("batch-size and iterations must be positive; warmup cannot be negative.")
+
+    if args.seed < 0:
+        raise SystemExit("seed must be non-negative.")
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     if args.model_dir:
         from qmini.generate import load_model
@@ -136,6 +143,7 @@ def main() -> None:
         "batch_size": args.batch_size,
         "prompt_tokens": args.batch_size * args.seq_len,
         "thinking_steps": args.thinking_steps,
+        "seed": args.seed,
         "warmup": args.warmup,
         "measured_iterations": args.iterations,
         "mode": args.mode,
