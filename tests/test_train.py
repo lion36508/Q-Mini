@@ -4,7 +4,10 @@ import pytest
 import torch
 
 from qmini.export import verify_packed_export
-from qmini.train import _evaluate, _masked_cross_entropy, _masked_cross_entropy_sum, train_model
+from qmini.train import (
+    SupervisedWindowIndex, _evaluate, _masked_cross_entropy,
+    _masked_cross_entropy_sum, _sample_batch, train_model,
+)
 from qmini.data import prepare_token_streams
 from qmini.tokenizer import train_tokenizer
 
@@ -414,3 +417,63 @@ def test_periodic_validation_uses_all_tokens_for_plain_text(monkeypatch):
         ).item()
     )
     assert report["eval_loss"] == pytest.approx(expected, rel=1e-7)
+
+
+def test_sparse_assistant_masks_always_sample_legal_windows(tmp_path):
+    token_count = 5000
+    seq_len = 4
+    tokens = np.arange(token_count, dtype=np.uint16)
+    masks = np.zeros(token_count, dtype=np.uint8)
+    # Position zero is not a label; only the first and last legal label positions
+    # should be sampled, even when positives are extremely sparse.
+    masks[0] = 1
+    masks[1] = 1
+    masks[-1] = 1
+    index = SupervisedWindowIndex(
+        masks, token_count=token_count, seq_len=seq_len, block_size=128
+    )
+    assert index.total_valid_windows == 2
+
+    rng = np.random.default_rng(20261109)
+    seen_starts = set()
+    for _ in range(80):
+        x, y, loss_mask = _sample_batch(
+            tokens, masks, batch_size=4, seq_len=seq_len,
+            rng=rng, device=torch.device("cpu"), window_index=index,
+        )
+        assert torch.all(loss_mask.sum(dim=1) > 0)
+        starts = x[:, 0].cpu().numpy().astype(int)
+        seen_starts.update(starts.tolist())
+        for start, row_mask in zip(starts, loss_mask.cpu().numpy()):
+            expected = masks[start + 1:start + seq_len + 1]
+            assert np.array_equal(row_mask.astype(np.uint8), expected)
+            assert expected.sum() > 0
+            assert np.array_equal(
+                y[(starts == start)[0]].cpu().numpy(),
+                tokens[start + 1:start + seq_len + 1].astype(np.int64),
+            )
+    assert seen_starts == {0, token_count - seq_len - 1}
+
+
+def test_sparse_assistant_mask_with_no_legal_label_window_fails_clearly():
+    token_count = 128
+    masks = np.zeros(token_count, dtype=np.uint8)
+    masks[0] = 1  # BOS/context position is never a next-token label.
+    with pytest.raises(ValueError, match="no supervised target inside any legal"):
+        SupervisedWindowIndex(
+            masks, token_count=token_count, seq_len=8, block_size=16
+        )
+
+
+def test_supervised_window_index_samples_uniformly_from_valid_start_positions():
+    token_count = 64
+    seq_len = 8
+    masks = np.zeros(token_count, dtype=np.uint8)
+    masks[20] = 1
+    index = SupervisedWindowIndex(
+        masks, token_count=token_count, seq_len=seq_len, block_size=8
+    )
+    valid_starts = set(range(20 - seq_len, 20))
+    rng = np.random.default_rng(91)
+    observed = {index.sample_start(rng) for _ in range(1000)}
+    assert observed == valid_starts
