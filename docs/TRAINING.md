@@ -47,3 +47,12 @@ python -m qmini.cli prepare --data-dir DATA --tokenizer tokenizer.json \\
 \`\`\`
 
 This is an approximate similarity filter, not semantic plagiarism detection. Inspect the grouped-document counts and keep the validation corpus independently curated.
+
+
+## Validation metric definition
+
+Periodic \`eval_loss\` is the global token-weighted cross-entropy over all sampled validation targets:
+
+\`eval_loss = sum(masked per-token NLL) / sum(supervised target tokens)\`.
+
+For assistant-only datasets, context tokens do not contribute to the numerator or denominator. The \`eval_supervised_tokens\` field records the denominator. \`eval_perplexity\` is \`exp(eval_loss)\` when representable. This matches standalone \`eval-lm\` and avoids bias from an unweighted arithmetic mean of batch means with unequal response lengths.
