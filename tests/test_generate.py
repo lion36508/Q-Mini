@@ -164,3 +164,50 @@ def test_legacy_chat_history_trimming_preserves_system_prefix():
     assert trimmed.startswith("[SYSTEM]\n")
     assert trimmed.count("[USER]") == 1
     assert trimmed.count("[ASSISTANT]") == 1
+
+
+
+def test_trim_chat_history_can_drop_all_prior_turns_and_keep_system_prefix():
+    counter = _RoleAwareTokenCounter()
+    system = "<|system|>Keep following the instruction.<|end|>\n"
+    oversized_turn = (
+        "<|user|>" + ("old detail " * 40) + "<|end|>\n"
+        "<|assistant|>old summary<|end|>\n"
+    )
+    next_user = "<|user|>What was my note?<|end|>\n<|assistant|>"
+    budget = len(counter.encode(system + next_user).ids)
+
+    trimmed = trim_chat_history(
+        system + oversized_turn,
+        counter,
+        token_budget=budget,
+        token_suffix=next_user,
+        allow_empty=True,
+    )
+    assert trimmed == system
+    assert len(counter.encode(trimmed + next_user).ids) <= budget
+    assert "<|user|>" not in trimmed
+    assert trimmed.startswith("<|system|>")
+
+
+def test_prepare_chat_prompt_drops_only_whole_prior_turn_when_required():
+    counter = _RoleAwareTokenCounter()
+    system = "<|system|>Follow the instruction.<|end|>\n"
+    old_turn = (
+        "<|user|>" + ("earlier context " * 35) + "<|end|>\n"
+        "<|assistant|>older answer<|end|>\n"
+    )
+    user_block = "<|user|>new small question<|end|>\n<|assistant|>"
+    max_context = len(counter.encode(system + user_block).ids)
+
+    trimmed, prompt = prepare_chat_prompt(
+        system + old_turn,
+        user_block,
+        "",
+        counter,
+        max_context=max_context,
+        has_control_tokens=True,
+    )
+    assert trimmed == system
+    assert prompt == system + user_block
+    assert len(counter.encode(prompt).ids) <= max_context
