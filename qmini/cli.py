@@ -138,9 +138,14 @@ def main() -> int:
     gen.add_argument("--model-dir", required=True); gen.add_argument("--prompt", required=True)
     gen.add_argument("--max-new-tokens", type=int, default=128); gen.add_argument("--temperature", type=float, default=0.8)
     gen.add_argument("--top-k", type=int, default=40); gen.add_argument("--top-p", type=float, default=0.9)
-    gen.add_argument("--thinking-steps", type=int, choices=range(1, 5)); gen.add_argument("--device", default=None)
+    gen.add_argument("--thinking-steps", type=int); gen.add_argument("--device", default=None)
     def do_generate(a):
         model, tokenizer, _ = load_model(a.model_dir, a.device)
+        if a.thinking_steps is not None and not 1 <= a.thinking_steps <= model.config.max_thinking_steps:
+            raise SystemExit(
+                f"--thinking-steps must be 1..{model.config.max_thinking_steps} "
+                "for this model configuration."
+            )
         print(generate(model, tokenizer, a.prompt, a.max_new_tokens, a.temperature, a.top_k, a.top_p, a.thinking_steps)); return 0
     gen.set_defaults(func=do_generate)
     verify_export = commands.add_parser("verify-export", help="validate a packed Q-Mini NPZ export")
@@ -226,11 +231,16 @@ def main() -> int:
     eval_tasks.add_argument("--dataset", required=True)
     eval_tasks.add_argument("--max-new-tokens", type=int, default=128)
     eval_tasks.add_argument("--limit", type=int, default=None)
-    eval_tasks.add_argument("--thinking-steps", type=int, choices=range(1, 5), default=None)
+    eval_tasks.add_argument("--thinking-steps", type=int, default=None)
     eval_tasks.add_argument("--device", default=None)
     eval_tasks.add_argument("--output", default=None)
     def do_eval_tasks(a):
         model, tokenizer, _device = load_model(a.model_dir, a.device)
+        if a.thinking_steps is not None and not 1 <= a.thinking_steps <= model.config.max_thinking_steps:
+            raise SystemExit(
+                f"--thinking-steps must be 1..{model.config.max_thinking_steps} "
+                "for this model configuration."
+            )
         report = evaluate_task_file(
             model, tokenizer, a.dataset, a.max_new_tokens, a.limit, a.thinking_steps
         )
