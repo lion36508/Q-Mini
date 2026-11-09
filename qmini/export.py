@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -99,11 +100,84 @@ def reconstruct_packed_state(path: str | Path) -> tuple[QMiniConfig, dict[str, n
     return config, state
 
 
-def verify_packed_export(path: str | Path) -> dict[str, int | str]:
-    config, state = reconstruct_packed_state(path)
+def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
+    """Validate packed arrays one tensor at a time without expanding a 5B model."""
+    target = Path(path)
+    packed_weight_bytes = 0
+    scale_bytes = 0
+    vector_bytes = 0
+    parameter_count = 0
+    q2_count = 0
+    fp16_count = 0
+
+    with np.load(target, allow_pickle=False) as archive:
+        if "metadata_json" not in archive:
+            raise ValueError("Packed archive is missing metadata_json.")
+        metadata = json.loads(str(archive["metadata_json"].item()))
+        if metadata.get("format") != "qmini-packed-v1":
+            raise ValueError("Unsupported Q-Mini packed export format.")
+        config = QMiniConfig.from_dict(metadata["config"])
+        specs = metadata.get("tensors")
+        if not isinstance(specs, list) or len(specs) != int(metadata.get("tensor_count", -1)):
+            raise ValueError("Packed archive tensor manifest count is invalid.")
+
+        seen: set[str] = set()
+        for spec in specs:
+            name = str(spec.get("name", ""))
+            if not name or name in seen:
+                raise ValueError(f"Missing or duplicate tensor name in packed archive: {name!r}")
+            seen.add(name)
+            shape = tuple(int(value) for value in spec.get("shape", []))
+            if not shape or any(value < 1 for value in shape):
+                raise ValueError(f"Invalid shape in packed archive for {name}.")
+            parameter_count += math.prod(shape)
+
+            if spec.get("kind") == "q2":
+                if len(shape) < 2:
+                    raise ValueError(f"Q2 tensor {name} has rank less than two.")
+                in_features = math.prod(shape[1:])
+                if int(spec.get("in_features", -1)) != in_features:
+                    raise ValueError(f"Q2 input dimension mismatch for {name}.")
+                packed = np.asarray(archive[spec["packed_key"]])
+                scales = np.asarray(archive[spec["scale_key"]])
+                if packed.dtype != np.uint8 or packed.shape != (
+                    shape[0], (in_features + 3) // 4
+                ):
+                    raise ValueError(f"Invalid packed Q2 payload for {name}.")
+                if scales.dtype != np.float32 or scales.shape != (shape[0],):
+                    raise ValueError(f"Invalid Q2 row scales for {name}.")
+                if not np.isfinite(scales).all() or np.any(scales <= 0):
+                    raise ValueError(f"Invalid or non-finite Q2 scales for {name}.")
+                packed_weight_bytes += int(packed.nbytes)
+                scale_bytes += int(scales.nbytes)
+                q2_count += 1
+            elif spec.get("kind") == "fp16":
+                value = np.asarray(archive[spec["value_key"]])
+                if len(shape) >= 2 or value.dtype != np.float16 or value.shape != shape:
+                    raise ValueError(f"Invalid FP16 vector payload for {name}.")
+                if not np.isfinite(value).all():
+                    raise ValueError(f"Non-finite FP16 parameter found in {name}.")
+                vector_bytes += int(value.nbytes)
+                fp16_count += 1
+            else:
+                raise ValueError(f"Unknown tensor encoding in packed archive: {name}.")
+
+    if parameter_count != config.estimated_parameter_count():
+        raise ValueError(
+            f"Packed archive has {parameter_count:,} parameters; config expects "
+            f"{config.estimated_parameter_count():,}."
+        )
     return {
         "format": "qmini-packed-v1",
-        "tensor_count": len(state),
-        "parameter_count": sum(int(value.size) for value in state.values()),
+        "tensor_count": len(seen),
+        "parameter_count": parameter_count,
+        "q2_tensor_count": q2_count,
+        "fp16_tensor_count": fp16_count,
+        "packed_weight_bytes": packed_weight_bytes,
+        "row_scale_bytes": scale_bytes,
+        "fp16_vector_bytes": vector_bytes,
+        "decoded_payload_bytes": packed_weight_bytes + scale_bytes + vector_bytes,
+        "artifact_bytes": target.stat().st_size,
+        "estimated_raw_layout_bytes": config.estimated_packed_export_bytes(),
         "context": config.max_context,
     }
