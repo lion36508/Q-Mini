@@ -56,7 +56,7 @@ Use fixed datasets, prompts and scoring methods when comparing revisions. Report
 
 ## Hybrid architecture tests
 
-The gated diagonal state-space path is accepted only when the parallel scan agrees with the sequential recurrence, gradients are finite, future-token changes cannot affect earlier logits, and incremental streaming logits match full-sequence logits within tolerance. These tests establish implementation correctness, not conversational competence.
+The gated diagonal state-space path is accepted only when the parallel scan agrees with the sequential recurrence, gradients are finite, future-token changes cannot affect earlier logits, and incremental streaming logits match batch logits within the configured prefill length. Longer streaming tests must additionally demonstrate fixed-size convolution/SSM caches and no prompt replay after max_context. These tests establish implementation correctness, not conversational competence.
 
 A capability report must additionally include fixed held-out tests for multi-turn continuity, instruction adherence, Assamese/Hindi/English performance, arithmetic and independently verified maths, science explanation, logic/state tracking, code-generation unit tests in a constrained runner, long-context recall and repetition/termination failures. Exact match and lexical token F1 are diagnostic metrics, not semantic reasoning scores.
 
