@@ -343,12 +343,14 @@ def _verify_initial_model_artifact(
     try:
         with manifest_path.open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
+        if not isinstance(manifest, dict):
+            raise ValueError("Q-Mini source manifest must be a JSON object.")
         source_config = QMiniConfig.from_json(config_path)
         manifest_config = QMiniConfig.from_dict(manifest.get("config"))
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as exc:
         raise ValueError("Q-Mini source manifest/config is invalid.") from exc
 
-    if not isinstance(manifest, dict) or manifest.get("format") != "qmini-final-model-v2":
+    if manifest.get("format") != "qmini-final-model-v2":
         raise ValueError("Unsupported Q-Mini final-model manifest format.")
     if source_config.to_dict() != manifest_config.to_dict():
         raise ValueError("Q-Mini source manifest config does not match config.json.")

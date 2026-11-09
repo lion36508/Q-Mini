@@ -646,3 +646,34 @@ def test_finetuning_rejects_tampered_source_export_manifest_hash(
             eval_batches=1,
             init_from=packed_path,
         )
+
+def test_finetuning_rejects_non_object_source_manifest(tmp_path, tiny_config):
+    from qmini.model import QMiniMoE
+
+    train_bin = tmp_path / "bad-manifest-train.bin"
+    valid_bin = tmp_path / "bad-manifest-valid.bin"
+    _write_stream(train_bin, tiny_config.vocab_size, 256, 901)
+    _write_stream(valid_bin, tiny_config.vocab_size, 256, 902)
+
+    source_dir = tmp_path / "bad-final-model"
+    source_dir.mkdir()
+    tiny_config.save(source_dir / "config.json")
+    (source_dir / "model_manifest.json").write_text("[]", encoding="utf-8")
+    torch.save(QMiniMoE(tiny_config).state_dict(), source_dir / "model.pt")
+
+    with pytest.raises(ValueError, match="source manifest/config is invalid"):
+        train_model(
+            tiny_config,
+            train_bin,
+            valid_bin,
+            tmp_path / "bad-manifest-sft",
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            eval_every=1,
+            save_every=1,
+            eval_batches=1,
+            init_from=source_dir / "model.pt",
+        )
+
