@@ -239,7 +239,8 @@ def _evaluate(
     device: torch.device,
     seed: int,
     window_index: SupervisedWindowIndex | None = None,
-) -> dict[str, float | None]:
+    thinking_steps: int | None = None,
+) -> dict[str, float | int | None]:
     was_training = model.training
     model.eval()
     rng = np.random.default_rng(seed)
@@ -252,7 +253,7 @@ def _evaluate(
                     tokens, masks, batch_size, seq_len, rng, device,
                     window_index=window_index,
                 )
-                result = model(x)
+                result = model(x, thinking_steps=thinking_steps)
                 nll_sum, target_count = _masked_cross_entropy_sum(
                     result["logits"], y, target_mask
                 )
@@ -271,6 +272,10 @@ def _evaluate(
         "eval_loss": mean_loss,
         "eval_perplexity": perplexity,
         "eval_supervised_tokens": int(total_supervised_targets),
+        "eval_thinking_steps": (
+            int(thinking_steps) if thinking_steps is not None
+            else int(model.config.thinking_steps)
+        ),
     }
 
 
@@ -646,6 +651,10 @@ def train_model(
     start_step = 0
     tokens_seen = 0
     supervised_tokens_seen = 0
+    thinking_step_counts = {
+        str(step_count): 0
+        for step_count in range(1, config.max_thinking_steps + 1)
+    }
     schedule_total_steps = steps
     if resume:
         if not checkpoint_path.is_file():
@@ -691,6 +700,12 @@ def train_model(
             "tokens_seen", start_step * batch_size * grad_accum * seq_len
         ))
         supervised_tokens_seen = int(state.get("supervised_tokens_seen", tokens_seen))
+        saved_step_counts = state.get("thinking_step_counts")
+        if isinstance(saved_step_counts, dict):
+            for step_key in thinking_step_counts:
+                thinking_step_counts[step_key] = int(
+                    saved_step_counts.get(step_key, 0)
+                )
         schedule_total_steps = int(state.get("schedule_total_steps", steps))
         if "numpy_rng" in state:
             rng.bit_generator.state = state["numpy_rng"]
@@ -735,6 +750,11 @@ def train_model(
         "model_config": config.to_dict(),
         "resume_contract": contract,
         "schedule_total_steps": schedule_total_steps,
+        "thinking_step_sampling": {
+            "distribution": "uniform_discrete",
+            "minimum": 1,
+            "maximum": config.max_thinking_steps,
+        },
         "precision": "bf16" if use_bf16 else "fp16" if use_fp16 else "fp32",
         "device": str(device),
     }
@@ -766,6 +786,7 @@ def train_model(
         optimizer.zero_grad(set_to_none=True)
         accum = {"loss": 0.0, "ce": 0.0, "aux": 0.0, "targets": 0.0}
         sampled_thinking_steps = random.randint(1, config.max_thinking_steps)
+        thinking_step_counts[str(sampled_thinking_steps)] += 1
         router_counts_total: list[torch.Tensor] | None = None
 
         # Weight assistant-response loss by supervised target count over the
@@ -849,6 +870,7 @@ def train_model(
             "gradient_norm": float(grad_norm.detach()),
             "learning_rate": lr,
             "thinking_steps": sampled_thinking_steps,
+            "thinking_step_sampling_counts": dict(thinking_step_counts),
             "router_token_counts": (
                 [counts.tolist() for counts in router_counts_total]
                 if router_counts_total is not None else []
@@ -856,11 +878,19 @@ def train_model(
         }
 
         if completed % eval_every == 0 or completed == steps:
-            record.update(_evaluate(
-                model, valid_tokens, valid_masks, batch_size, seq_len, eval_batches,
-                device, actual_seed + completed,
-                window_index=valid_window_index,
-            ))
+            per_step_evaluation: dict[str, dict[str, Any]] = {}
+            for evaluation_steps in range(1, config.max_thinking_steps + 1):
+                per_step_evaluation[str(evaluation_steps)] = _evaluate(
+                    model, valid_tokens, valid_masks, batch_size, seq_len,
+                    eval_batches, device, actual_seed + completed,
+                    window_index=valid_window_index,
+                    thinking_steps=evaluation_steps,
+                )
+            record["eval_by_thinking_steps"] = per_step_evaluation
+            record["eval_primary_thinking_steps"] = config.thinking_steps
+            record.update(
+                per_step_evaluation[str(config.thinking_steps)]
+            )
         if use_amp:
             record["peak_cuda_memory_bytes"] = int(torch.cuda.max_memory_allocated())
 
@@ -870,6 +900,7 @@ def train_model(
                 "step": completed,
                 "tokens_seen": tokens_seen,
                 "supervised_tokens_seen": supervised_tokens_seen,
+                "thinking_step_counts": dict(thinking_step_counts),
                 "schedule_total_steps": schedule_total_steps,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
