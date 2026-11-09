@@ -17,6 +17,8 @@ from qmini.quantization import (
     unpack_int4_groupwise,
     unpack_quaternary,
     unpack_ternary,
+    quantize_int8_rowwise,
+    dequantize_int8_rowwise,
 )
 
 
@@ -97,7 +99,7 @@ def run_ablation(
     if not isinstance(state, dict) or not state:
         raise ValueError("Q-Mini model state is not a non-empty tensor dictionary.")
 
-    formats = ("fp16", "q2", "ternary", "int4")
+    formats = ("fp16", "int8", "q2", "ternary", "int4")
     totals = {name: _metric_accumulator() for name in formats}
     byte_counts = {name: 0 for name in formats}
     per_tensor: dict[str, Any] = {}
@@ -117,7 +119,7 @@ def run_ablation(
                 "kind": "fp16-vector",
                 "fp16": quantization_error_metrics(reference, approximation),
             }
-            for format_name in ("q2", "ternary", "int4"):
+            for format_name in ("int8", "q2", "ternary", "int4"):
                 _add_metrics(totals[format_name], reference, approximation)
             vector_bytes = reference.numel() * 2
             for format_name in formats:
@@ -139,6 +141,16 @@ def run_ablation(
         row_report["formats"]["fp16"] = {
             **quantization_error_metrics(flat, fp16),
             "bytes": flat.numel() * 2,
+        }
+
+        int8_values, int8_scales = quantize_int8_rowwise(flat)
+        int8 = dequantize_int8_rowwise(int8_values, int8_scales)
+        int8_bytes = int(int8_values.numel() + int8_scales.numel() * 4)
+        _add_metrics(totals["int8"], flat, int8)
+        byte_counts["int8"] += int8_bytes
+        row_report["formats"]["int8"] = {
+            **quantization_error_metrics(flat, int8),
+            "bytes": int8_bytes,
         }
 
         q2_packed, q2_scales = pack_quaternary(flat)
@@ -224,7 +236,7 @@ def run_ablation(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compare FP16, Q2, zero-preserving ternary and groupwise INT4 weight error."
+        description="Compare FP16, rowwise INT8, Q2, zero-preserving ternary and groupwise INT4 weight error."
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model-dir", help="Q-Mini final_model directory or training run directory")
