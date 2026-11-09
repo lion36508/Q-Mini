@@ -90,9 +90,14 @@ def main() -> int:
     prep.add_argument("--output-dir", required=True); prep.add_argument("--valid-fraction", type=float, default=0.02)
     prep.add_argument("--loss-mask", choices=("auto", "all", "assistant"), default="auto",
         help="auto: assistant-only targets for chats/Q&A, full LM loss for plain text")
+    prep.add_argument(
+        "--include-absolute-source-paths", action="store_true",
+        help="explicitly include machine-specific absolute source paths in dataset.json",
+    )
     prep.set_defaults(func=lambda a: (
         print(json.dumps(prepare_token_streams(
-            a.data_dir, a.tokenizer, a.output_dir, a.valid_fraction, a.loss_mask
+            a.data_dir, a.tokenizer, a.output_dir, a.valid_fraction, a.loss_mask,
+            include_absolute_source_paths=a.include_absolute_source_paths,
         ), indent=2)) or 0
     ))
     train = commands.add_parser("train", help="train from scratch or resume a checkpoint")
