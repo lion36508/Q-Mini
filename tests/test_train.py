@@ -18,6 +18,36 @@ def _write_stream(path, vocab_size, length, seed):
     np.asarray(rng.integers(0, vocab_size, size=length), dtype=np.uint16).tofile(path)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("steps", True, TypeError),
+        ("steps", 1.5, TypeError),
+        ("batch_size", "1", TypeError),
+        ("seq_len", False, TypeError),
+        ("learning_rate", True, TypeError),
+        ("weight_decay", float("nan"), ValueError),
+        ("seed", 1.5, TypeError),
+        ("resume", "false", TypeError),
+        ("extend_schedule", 1, TypeError),
+        ("allow_legacy_resume", None, TypeError),
+    ],
+)
+def test_training_rejects_malformed_public_api_arguments(
+    tmp_path, tiny_config, field, value, error
+):
+    kwargs = {field: value}
+    with pytest.raises(error):
+        train_model(
+            tiny_config,
+            tmp_path / "not-read-train.bin",
+            tmp_path / "not-read-valid.bin",
+            tmp_path / "not-created-run",
+            steps=1,
+            **kwargs,
+        )
+
+
 def test_masked_cross_entropy_ignores_context_positions():
     logits = torch.tensor([[[2.0, 0.0], [0.0, 2.0], [1.0, 0.0]]])
     targets = torch.tensor([[0, 1, 1]])
