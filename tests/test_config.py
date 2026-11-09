@@ -66,4 +66,7 @@ def test_capacity_profiles_have_exact_audited_parameter_targets():
         config = QMiniConfig.from_json(root / filename)
         assert config.estimated_parameter_count() == parameter_count
         assert config.use_state_space
-    assert QMiniConfig.from_json(root / "qmini_5b.json").gradient_checkpointing
+    qmini_5b = QMiniConfig.from_json(root / "qmini_5b.json")
+    assert qmini_5b.gradient_checkpointing
+    assert qmini_5b.estimated_packed_export_bytes() == 1_294_691_936
+    assert qmini_5b.estimated_packed_export_bytes() < 1_500_000_000
