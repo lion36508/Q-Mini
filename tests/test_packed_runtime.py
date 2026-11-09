@@ -200,3 +200,36 @@ def test_legacy_q2_v1_export_reconstruct_and_runtime_compatibility(
         expected = reference(ids)["logits"]
         actual = packed(ids)["logits"]
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+
+def test_q2_v2_all_zero_depthwise_row_survives_export_and_packed_inference(
+    tiny_config, tmp_path
+):
+    from qmini.export import verify_packed_export
+
+    torch.manual_seed(1001)
+    config = _packed_config(tiny_config)
+    reference = QMiniMoE(config).eval()
+    with torch.no_grad():
+        reference.blocks[0].conv.depthwise_weight[0].zero_()
+
+    path = export_packed_state(
+        reference.state_dict(), config, tmp_path / "q2-v2-zero-row.npz"
+    )
+    report = verify_packed_export(path)
+    assert report["format"] == "qmini-packed-v2"
+
+    packed = load_packed_model(path, expected_config=config)
+    convolution = packed.blocks[0].conv
+    assert convolution._qmini_q2_version == 2
+    assert convolution._qmini_weight_scales[0].item() == 0.0
+    kernel = convolution._kernel()
+    assert torch.equal(kernel[0], torch.zeros_like(kernel[0]))
+
+    ids = torch.randint(0, config.vocab_size, (1, 9))
+    with torch.inference_mode():
+        expected = reference(ids)["logits"]
+        actual = packed(ids)["logits"]
+    assert torch.isfinite(actual).all()
+    assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
