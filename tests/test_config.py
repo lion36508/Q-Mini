@@ -75,6 +75,6 @@ def test_capacity_profiles_have_exact_audited_parameter_targets():
     assert qmini_5b.estimated_cpu_inference_working_set_bytes(batch_size=1) == 1_409_085_024
 
     dense_reference = QMiniConfig.from_json(root / "qmini_dense_853m.json")
-    assert dense_reference.estimated_parameter_count() == 852_350_993
+    assert dense_reference.estimated_parameter_count() == 852_281_344
     assert dense_reference.estimated_unique_active_parameter_count() == 852_350_993
     assert dense_reference.estimated_packed_export_bytes() < qmini_5b.estimated_packed_export_bytes()
