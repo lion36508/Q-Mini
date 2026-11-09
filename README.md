@@ -332,3 +332,8 @@ python -m qmini.cli prepare --help
 \`\`\`
 
 The default \`--near-duplicate-hamming-distance 0\` keeps exact-deduplication behavior. Values 1–3 group similar word-trigram SimHashes before assigning whole groups to train/validation; the grouping threshold is recorded in \`dataset.json\`.
+
+
+## Streaming context semantics
+
+\`max_context\` is the maximum sequence length accepted by a single batch forward or initial prompt prefill. It is not a hard cap on the total number of tokens processed by an incremental stream. After prefill, the convolution caches remain fixed-size and the diagonal SSM retains a fixed-width learned state, so generation can continue without replaying the entire prompt after every token. This recurrent state is compressed memory, not exact access to every previous token. It therefore may preserve useful long-range information, but exact recall of arbitrary old details is not guaranteed.
