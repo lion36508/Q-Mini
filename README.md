@@ -1,4 +1,4 @@
-# Q-Mini — Text-Only CausalConv-MoE Language Model
+# Q-Mini — Attention-Free CausalConv + State-Space MoE Language Model
 
 **Q-Mini is a from-scratch language-model research project aimed at becoming a compact, capable, offline-friendly text assistant.** It is not an Android app, a hosted-chatbot wrapper, or a fine-tune of downloaded pretrained weights. The model starts from random initialization. PyTorch supplies tensor operations, automatic differentiation and optimization; the tokenizer is trained locally from permitted corpus data.
 
@@ -36,7 +36,7 @@ These are **training and product objectives**, not claims that the current rando
 
 ## 3. Current architecture baseline
 
-The current configuration is a compact research baseline, not a claimed 5B or production-scale model.
+The original compact convolution-only baseline remains available. New hybrid research profiles add a gated diagonal state-space path while preserving the no-Transformer-attention constraint. The 5M and 5B configs are capacity specifications, not trained checkpoints or production-readiness claims.
 
 | Component | Current baseline |
 |---|---:|
@@ -78,7 +78,7 @@ With kernel width 10 and the configured dilations, the six main blocks have a th
 
 ### Higher-capacity training profile
 
-The compact configs/qmini_base.json profile is retained for CPU smoke tests and low-resource development. The Colab notebook now trains with configs/qmini_research_134m.json, a larger from-scratch profile:
+The compact configs/qmini_base.json profile is retained for CPU smoke tests and low-resource development. The historical convolution-only profile is configs/qmini_research_134m.json. The updated Colab pipeline uses configs/qmini_research_152m.json, a hybrid profile:
 
 | Setting | Research profile |
 |---|---:|
@@ -94,7 +94,7 @@ The compact configs/qmini_base.json profile is retained for CPU smoke tests and 
 | Shared refinement | 1–4 passes |
 | Weight alphabet | {-2, -1, +1, +2} |
 
-At the full 8,192-token vocabulary this shape has **134,426,200 parameters**, including its single shared refinement block. The audit command and CI assert the instantiated count; if the locally trained tokenizer produces a smaller vocabulary, the active config and actual count are correspondingly smaller. This is a 134M-class research model, not a claim of state-of-the-art assistant quality. That depends on corpus quality, tokens seen, training compute and held-out capability evaluation.
+At the full 8,192-token vocabulary the historical convolution-only shape has **134,426,200 parameters**, including its single shared refinement block. The audit command and CI assert the instantiated count; if the locally trained tokenizer produces a smaller vocabulary, the active config and actual count are correspondingly smaller. This is a 134M-class research model, not a claim of state-of-the-art assistant quality. That depends on corpus quality, tokens seen, training compute and held-out capability evaluation.
 
 ### Quantization — what it does and does not mean
 
@@ -234,7 +234,7 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 - qmini/memory.py — opt-in local SQLite/FTS5 memory with explicit CRUD and JSON export.
 - qmini/native_kernel.cpp, qmini/native.py — packed INT8/quaternary CPU projection, AArch64/NEON path, scalar fallback and backend detection.
 - scripts/benchmark.py — repeatable full-forward, streaming prefill and cached autoregressive decode benchmark.
-- configs/ — compact base, 134M-class research and smoke configurations.
+- configs/ — compact base, 5M, historical 134M, hybrid 152M, 5B capacity and smoke configurations.
 - tests/ — model, causality, quantization, data, training, export and native tests.
 - docs/ — architecture, training, evaluation and project scope.
 - colab/ — Colab training notebook.
@@ -252,3 +252,46 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 - The GitHub repository is public. Never commit credentials, private datasets, personal information or private checkpoints. Keep such artifacts in private storage.
 
 **Project principle:** build a truthful, testable, efficient text model first; add assistant capabilities only when the training data, implementation and evaluations support them.
+
+
+## 13. Updated attention-free hybrid architecture
+
+The new hybrid model path is:
+
+```text
+Token IDs -> Quaternary Embedding
+  -> [RMSNorm -> Gated Causal Depthwise Conv -> Residual
+      -> RMSNorm -> Gated Diagonal State-Space Memory -> Residual
+      -> RMSNorm -> Sparse Top-1 MoE -> Residual] x N
+  -> Shared Refinement Block
+  -> RMSNorm -> Tied Language-Model Head
+```
+
+No Transformer self-attention, Q/K/V projections or dot-product attention are introduced. The state-space layer maintains a learned fixed-width compressed state across prior tokens. It is not an exact transcript store or arbitrary content-addressable retrieval. Its parallel training scan and recurrent streaming update are tested against each other. This is Q-Mini's own diagonal SSM implementation, not an official Mamba or RWKV implementation.
+
+| Profile | Total parameters | Unique Top-1 active parameters/token | Purpose |
+|---|---:|---:|---|
+| `qmini_5m.json` | 5,245,996 | 3,070,636 | Small-scale development |
+| `qmini_research_134m.json` | 134,426,200 | 41M-class | Historical convolution-only baseline |
+| `qmini_research_152m.json` | 152,483,800 | 51,430,232 | Hybrid GPU research profile |
+| `qmini_5b.json` | 5,132,630,288 | 852,873,488 | Capacity design, not currently distributed-training-ready |
+
+The CLI can inspect a config without allocating the model:
+
+```bash
+python -m qmini.cli plan --config configs/qmini_5m.json
+python -m qmini.cli plan --config configs/qmini_research_152m.json
+python -m qmini.cli plan --config configs/qmini_5b.json
+```
+
+FP32 parameter/gradient/AdamW-state lower bounds are approximately 83.9 MB for 5M, 2.44 GB for 152M and 82.1 GB for 5B. These figures exclude activation memory, CUDA workspaces, fragmentation and communication. The 5B profile is not a single-H100 training recipe: this repository still has no FSDP/ZeRO, expert parallelism or tensor parallelism.
+
+## 14. Training budget and staged instruction fine-tuning
+
+The Colab notebook uses a configurable initial token budget based on 20 tokens per unique active Top-1 parameter. This is an experimental compute-budget heuristic, not an established sparse-MoE scaling law. It prints the approximate number of passes over the available training-token stream so a small corpus cannot silently masquerade as billions of unique examples.
+
+The training loop aggregates assistant-response loss by supervised target-token count across the complete gradient-accumulation batch. This prevents a short assistant answer and a long assistant answer from receiving equal microbatch weight solely because they happened to land in different microbatches.
+
+A new instruction/SFT run can initialize from `final_model/model.pt` using `--init-from`. Only the model state dictionary is loaded; the fine-tuning stage gets a fresh optimizer. Its source model hash/path is saved in the run manifest and verified when resuming the SFT run. Use an assistant-only loss mask for structured conversations.
+
+These additions improve architectural coverage and training correctness. They do not prove natural conversational ability. That still requires real training, held-out multi-turn evaluation and measured improvements.
