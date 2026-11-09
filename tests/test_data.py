@@ -402,3 +402,32 @@ def test_large_json_array_trailing_whitespace_is_consumed_in_bounded_chunks(tmp_
     with pytest.raises(ValueError, match="Unexpected data after JSON array"):
         list(_iter_json_array(invalid, tmp_path / "invalid.json", chunk_chars=64))
     assert all(0 < size <= 64 for size in invalid.read_sizes)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        " ",
+        "\n\n",
+        " \t\r\n  ",
+    ],
+)
+def test_streaming_json_array_accepts_leading_whitespace(tmp_path, prefix):
+    source = tmp_path / "leading-whitespace.json"
+    source.write_text(
+        prefix + '[{"text":"first record"},{"text":"second record"}]',
+        encoding="utf-8",
+    )
+    records = list(iter_text_records([source]))
+    assert records == ["first record", "second record"]
+
+
+def test_streaming_json_array_accepts_utf8_bom_and_leading_whitespace(tmp_path):
+    source = tmp_path / "bom-leading-whitespace.json"
+    source.write_bytes(
+        b"\xef\xbb\xbf \r\n\t ["
+        b'{"text":"first after BOM"},{"text":"second after BOM"}]'
+    )
+    assert list(iter_text_records([source])) == [
+        "first after BOM", "second after BOM"
+    ]
