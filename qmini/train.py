@@ -417,6 +417,8 @@ def train_model(
 
     if (train_mask_bin is None) != (valid_mask_bin is None):
         raise ValueError("Provide both --train-mask-bin and --valid-mask-bin, or neither.")
+    if tokenizer_path is not None and not Path(tokenizer_path).is_file():
+        raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
     if resume and init_from is not None:
         raise ValueError("--resume and --init-from are mutually exclusive.")
     initial_model_path = Path(init_from).expanduser().resolve() if init_from is not None else None
@@ -489,12 +491,10 @@ def train_model(
             from .packed_runtime import load_packed_state_into_trainable_model
             load_packed_state_into_trainable_model(model, initial_model_path)
         else:
-            try:
-                initial_state = torch.load(
-                    initial_model_path, map_location=device, weights_only=True
-                )
-            except TypeError:
-                initial_state = torch.load(initial_model_path, map_location=device)
+            # Never fall back to unrestricted pickle loading for model files.
+            initial_state = torch.load(
+                initial_model_path, map_location=device, weights_only=True
+            )
             if not isinstance(initial_state, dict) or "format" in initial_state or "model" in initial_state:
                 raise ValueError(
                     "--init-from must point to final_model/model.pt or a verified "
@@ -525,12 +525,11 @@ def train_model(
     if resume:
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"No checkpoint to resume: {checkpoint_path}")
-        try:
-            state = torch.load(
-                checkpoint_path, map_location=device, weights_only=False
-            )
-        except TypeError:
-            state = torch.load(checkpoint_path, map_location=device)
+        # Checkpoints contain tensors and primitive metadata; use the restricted
+        # unpickler so resume never executes arbitrary pickle globals.
+        state = torch.load(
+            checkpoint_path, map_location=device, weights_only=True
+        )
 
         if state.get("format") not in {"qmini-checkpoint-v1", "qmini-checkpoint-v2"}:
             raise ValueError("Unsupported or unrecognized Q-Mini checkpoint format.")
@@ -797,12 +796,23 @@ def train_model(
     if dense_snapshot_included:
         _atomic_torch_save(model.state_dict(), final_dir / "model.pt")
 
+    tokenizer_fingerprint = (
+        _sha256_file(tokenizer_path)
+        if tokenizer_path is not None and Path(tokenizer_path).is_file()
+        else None
+    )
     final_report = {
         "format": "qmini-final-model-v2",
         "step": steps,
         "tokens_seen": tokens_seen,
         "supervised_tokens_seen": supervised_tokens_seen,
         "loss_masked_training": train_masks is not None,
+        "tokenizer_sha256": (
+            tokenizer_fingerprint["sha256"] if tokenizer_fingerprint else None
+        ),
+        "tokenizer_size_bytes": (
+            tokenizer_fingerprint["size_bytes"] if tokenizer_fingerprint else None
+        ),
         "parameters": model.parameter_report()["total"],
         "packed_export": packed_path.name,
         "packed_export_bytes": packed_path.stat().st_size,
