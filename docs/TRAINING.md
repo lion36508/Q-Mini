@@ -27,3 +27,23 @@ For a separate instruction/SFT stage, use `--init-from /path/to/pretrain/final_m
 ## 5B resource boundary
 
 The 5B profile's FP32 weights, gradients and two AdamW moments require approximately 82.1 GB before activation memory, workspaces or fragmentation. The current trainer is single-process and lacks FSDP/ZeRO and expert/tensor parallelism. Do not treat the 5B file as a ready-to-run H100 training job.
+
+
+## Near-duplicate isolation
+
+Exact SHA-256 deduplication is always active. Optionally group near-duplicates using a disk-backed 64-bit SimHash over word trigrams. The threshold is the maximum Hamming distance from 1 to 3; zero disables SimHash grouping and preserves exact-only behavior. The entire similarity group is assigned to one split, and the dataset manifest records the threshold, group count and number of documents absorbed into groups.
+
+Use the **same** holdout fraction and near-duplicate distance in both commands:
+
+\`\`\`bash
+python -m qmini.cli tokenizer --data-dir DATA --output tokenizer.json \\
+  --vocab-size 32768 --valid-fraction 0.02 \\
+  --near-duplicate-hamming-distance 3 \\
+  --config-output config.json
+
+python -m qmini.cli prepare --data-dir DATA --tokenizer tokenizer.json \\
+  --output-dir prepared --valid-fraction 0.02 \\
+  --near-duplicate-hamming-distance 3 --loss-mask auto
+\`\`\`
+
+This is an approximate similarity filter, not semantic plagiarism detection. Inspect the grouped-document counts and keep the validation corpus independently curated.
