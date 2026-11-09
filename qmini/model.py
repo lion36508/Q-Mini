@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 import torch
@@ -207,8 +208,15 @@ class GatedStateSpaceMixer(nn.Module):
         state[t] = decay[t] * state[t-1] + (1-decay[t]) * drive[t]
     """
 
-    def __init__(self, dim: int, dropout: float = 0.0):
+    def __init__(
+        self,
+        dim: int,
+        dropout: float = 0.0,
+        max_context: int = 2048,
+    ):
         super().__init__()
+        if max_context < 2:
+            raise ValueError("State-space max_context must be at least 2.")
         self.dim = dim
         self.state_input = QLinear(dim, dim)
         self.state_decay = QLinear(dim, dim)
@@ -216,7 +224,15 @@ class GatedStateSpaceMixer(nn.Module):
         self.output = QLinear(dim, dim)
         nn.init.zeros_(self.state_decay.weight)
         if self.state_decay.bias is not None:
-            nn.init.constant_(self.state_decay.bias, -2.0)
+            # Spread initial state time constants logarithmically from 2 to
+            # max_context tokens, rather than giving every channel one timescale.
+            with torch.no_grad():
+                log_times = torch.linspace(
+                    math.log(2.0), math.log(float(max_context)), dim
+                )
+                time_constants = torch.exp(log_times)
+                rates = time_constants.reciprocal()
+                self.state_decay.bias.copy_(torch.log(torch.expm1(rates)))
         self.dropout = nn.Dropout(dropout)
 
     @staticmethod
@@ -341,7 +357,7 @@ class QMiniBlock(nn.Module):
             if config.use_state_space else None
         )
         self.state_mixer = (
-            GatedStateSpaceMixer(config.d_model, config.dropout)
+            GatedStateSpaceMixer(config.d_model, config.dropout, config.max_context)
             if config.use_state_space else None
         )
         self.moe_norm = RMSNorm(config.d_model, config.rms_norm_eps)
