@@ -94,7 +94,7 @@ Reports include per-category and per-language task-pass rates, Wilson 95% confid
 
 ## Weight-format reconstruction experiment
 
-Run \`python scripts/quantization_ablation.py --model-dir /path/to/final_model --output reports/quantization.json\` for a small final model, or \`python scripts/quantization_ablation.py --checkpoint /path/to/run/latest.pt --output reports/quantization.json\` for a training checkpoint. It compares FP16, the current Q2 format, zero-preserving ternary and groupwise INT4. The report contains overall and per-tensor relative L2 error, cosine similarity, maximum absolute error and estimated weight payload bytes.
+Run \`python scripts/quantization_ablation.py --model-dir /path/to/final_model --output reports/quantization.json\` for a small final model, or \`python scripts/quantization_ablation.py --checkpoint /path/to/run/latest.pt --output reports/quantization.json\` for a training checkpoint. It compares FP16, rowwise INT8, normalized Q2-v2, zero-preserving ternary and groupwise INT4. The report contains overall and per-tensor relative L2 error, cosine similarity, maximum absolute error and estimated weight payload bytes.
 
 This script measures reconstruction error only. It does not measure model NLL, assistant capability, latency or peak RAM, and it does not change the default Q2 exporter. Those quality/runtime ablations require the same Q-Mini-trained checkpoint and a fixed held-out evaluation set.
 
