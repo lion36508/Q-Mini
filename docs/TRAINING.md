@@ -22,6 +22,8 @@ The compact convolution-only qmini_base.json and historical qmini_research_134m.
 
 ## Training budget and staged fine-tuning
 
+The Colab setup installs the Q-Mini package with `--no-deps` so dependency resolution does not silently replace Colab's preinstalled CUDA-enabled PyTorch wheel. It separately installs the Python data/test dependencies and checks that the runtime PyTorch version is at least 2.10.0. The 50-step smoke proof may fall back to CPU for basic code-path validation, but the optional 5M, 152M and SFT training stages fail closed unless CUDA is available. The 152M and SFT stages also require at least 8 GiB of currently free GPU memory by default; this is a launch floor, not a guarantee against out-of-memory errors. Actual memory must still be monitored during the first microbatches.
+
 The Colab notebook uses a configurable initial training-token budget based on 20 tokens per unique active Top-1 parameter. This is only a compute-budget heuristic; sparse-MoE scaling has to be measured. It reports how many passes the requested token budget implies over the available training stream, making corpus repetition visible.
 
 For a separate instruction/SFT stage, use `--init-from /path/to/pretrain/final_model/model.pt`. The trainer loads only the model state dictionary and creates a new optimizer. The source path/hash is kept in the run manifest and verified when resuming that fine-tuning run. Use response-only masks for structured chat examples.
