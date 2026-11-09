@@ -302,6 +302,15 @@ class QMiniMoE(nn.Module):
         self.refinement = QMiniBlock(self.config, dilation=1)
         self.final_norm = RMSNorm(self.config.d_model, self.config.rms_norm_eps)
 
+    @staticmethod
+    def _validate_token_id_dtype(input_ids: torch.Tensor) -> None:
+        if (
+            input_ids.dtype == torch.bool
+            or input_ids.is_floating_point()
+            or input_ids.is_complex()
+        ):
+            raise TypeError("input_ids must use an integer tensor dtype; implicit float-to-ID casts are refused.")
+
     def forward(self, input_ids: torch.Tensor, thinking_steps: int | None = None) -> dict[str, Any]:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
@@ -309,6 +318,7 @@ class QMiniMoE(nn.Module):
             raise ValueError(f"Sequence length must be in [1, {self.config.max_context}].")
         if input_ids.shape[0] < 1:
             raise ValueError("Batch size must be at least one.")
+        self._validate_token_id_dtype(input_ids)
         if input_ids.numel() and (
             int(input_ids.min()) < 0 or int(input_ids.max()) >= self.config.vocab_size
         ):
@@ -367,6 +377,7 @@ class QMiniMoE(nn.Module):
             input_ids = input_ids[:, 0]
         if input_ids.ndim != 1 or input_ids.shape[0] < 1:
             raise ValueError("forward_step expects token IDs shaped [batch] or [batch, 1].")
+        self._validate_token_id_dtype(input_ids)
         if input_ids.numel() and (
             int(input_ids.min()) < 0 or int(input_ids.max()) >= self.config.vocab_size
         ):
