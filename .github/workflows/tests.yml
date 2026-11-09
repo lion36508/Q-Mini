@@ -58,6 +58,19 @@ jobs:
           PY
       - name: Run tests
         run: pytest -q
+      - name: Verify wheel contains native kernel source
+        run: |
+          python -m pip wheel . --no-deps --no-build-isolation -w /tmp/qmini-wheel
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob("/tmp/qmini-wheel/qmini-*.whl")
+          assert len(wheels) == 1, wheels
+          with zipfile.ZipFile(wheels[0]) as archive:
+              assert "qmini/native_kernel.cpp" in archive.namelist()
+          print("Wheel includes qmini/native_kernel.cpp")
+          PY
       - name: Run audit and CLI checks
         run: |
           python -m qmini.cli audit --config configs/qmini_smoke.json
