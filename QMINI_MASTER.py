@@ -54,8 +54,7 @@ def main() -> int:
         return run([sys.executable, "-m", "qmini.native", "--build"])
     sys.argv = ["qmini", *sys.argv[1:]]
     from qmini.cli import main as cli_main
-    cli_main()
-    return 0
+    return int(cli_main() or 0)
 
 
 if __name__ == "__main__":
