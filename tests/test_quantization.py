@@ -137,14 +137,17 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
         == report["formats"]["q2"]["estimated_weight_payload_bytes"]
     )
     assert report["q2_row_scale_reports"]
-    assert any(
-        "router" in name
-        for name in report["tensor_results"]
-    ) is any(
-        item["tensor_count"] > 0
-        for item in report["component_metrics"].values()
-        if "router" in report["component_metrics"]
-    )
+    assert set(report["component_metrics"]) == {
+        "embedding", "output_projection", "router", "expert",
+        "convolution", "state_space", "other",
+    }
+    assert sum(
+        item["tensor_count"] for item in report["component_metrics"].values()
+    ) == report["matrix_tensor_count"] + report["vector_tensor_count"]
+    for item in report["q2_row_scale_reports"].values():
+        assert item["count"] > 0
+        assert item["zero_count"] >= 0
+        assert item["max"] >= item["min"] >= 0.0
     for metrics in report["formats"].values():
         assert np.isfinite(metrics["relative_l2_error"])
         assert np.isfinite(metrics["cosine_similarity"])
