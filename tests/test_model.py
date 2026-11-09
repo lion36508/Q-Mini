@@ -205,3 +205,42 @@ def test_state_space_channels_start_with_logarithmic_timescales(tiny_config):
     assert torch.isclose(
         time_constants[-1], torch.tensor(float(tiny_config.max_context)), rtol=1e-4
     )
+
+
+@pytest.mark.parametrize("use_state_space", [False, True])
+def test_streaming_matches_batch_sliding_window_after_context_limit(
+    tiny_config, use_state_space
+):
+    values = tiny_config.to_dict()
+    values.update({"max_context": 8, "use_state_space": use_state_space})
+    config = QMiniConfig.from_dict(values)
+    torch.manual_seed(730)
+    model = QMiniMoE(config).eval()
+    ids = torch.randint(0, config.vocab_size, (2, 23))
+    state = None
+
+    with torch.inference_mode():
+        for position in range(ids.shape[1]):
+            result, state = model.forward_step(ids[:, position], state=state)
+            start = max(0, position - config.max_context + 1)
+            expected = model(ids[:, start:position + 1])["logits"][:, -1]
+            assert torch.allclose(
+                result["logits"], expected, atol=4e-5, rtol=4e-5
+            ), f"rolling context mismatch at token {position}"
+
+    assert state is not None
+    assert state.tokens_processed == ids.shape[1]
+    assert state.token_history is not None
+    assert state.token_history.shape == (ids.shape[0], config.max_context)
+
+
+def test_forward_step_rejects_grad_enabled_streaming(tiny_config):
+    model = QMiniMoE(tiny_config).eval()
+    with pytest.raises(RuntimeError, match="inference-only"):
+        model.forward_step(torch.tensor([1]))
+
+    with torch.no_grad():
+        result, state = model.forward_step(torch.tensor([1]))
+    assert result["logits"].shape == (1, tiny_config.vocab_size)
+    assert state.token_history is not None
+    assert state.token_history.requires_grad is False
