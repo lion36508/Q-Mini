@@ -292,14 +292,14 @@ The Colab notebook uses a configurable initial token budget based on 20 tokens p
 
 The training loop aggregates assistant-response loss by supervised target-token count across the complete gradient-accumulation batch. This prevents a short assistant answer and a long assistant answer from receiving equal microbatch weight solely because they happened to land in different microbatches.
 
-A new instruction/SFT run can initialize from `final_model/model.pt` using `--init-from`. Only the model state dictionary is loaded; the fine-tuning stage gets a fresh optimizer. Its source model hash/path is saved in the run manifest and verified when resuming the SFT run. Use an assistant-only loss mask for structured conversations.
+A new instruction/SFT run can initialize from `final_model/model.pt` or the packed `final_model/model.qmini.npz` using `--init-from`. The packed archive is streamed into trainable weights tensor-by-tensor; the fine-tuning stage gets a fresh optimizer. Its source model hash/path is saved in the run manifest and verified when resuming the SFT run. Use an assistant-only loss mask for structured conversations.
 
 These additions improve architectural coverage and training correctness. They do not prove natural conversational ability. That still requires real training, held-out multi-turn evaluation and measured improvements.
 
 
 ## 15. 5B deployment size and CPU inference
 
-The 5B profile contains 5,132,630,288 parameters. Its exact row-padded Q2 + FP32 row-scale + FP16 vector layout is estimated at **1,294,691,936 bytes** (about 1.295 GB decimal / 1.206 GiB), below the 1.5 GB model-weight artifact budget. This is a pre-training layout estimate; the actual exported archive is measured and written to \`model_manifest.json\`. Tokenizer and application files are additional.
+The 5B profile contains 5,132,630,288 parameters. Its exact row-padded Q2 + FP32 row-scale + FP16 vector layout is estimated at **1,294,831,200 bytes** (about 1.295 GB decimal / 1.206 GiB), below the 1.5 GB model-weight artifact budget. This is a pre-training layout estimate; the actual exported archive is measured and written to \`model_manifest.json\`. Tokenizer and application files are additional.
 
 Large final model folders omit the redundant FP32 \`model.pt\` and keep \`model.qmini.npz\`. The default loader uses the packed CPU runtime without creating 5B dense FP32 matrices. A compiled C++ kernel is recommended for speed:
 
@@ -311,3 +311,24 @@ python -m qmini.cli generate --model-dir /path/to/final_model --prompt "Explain 
 The PyTorch fallback still works without the C++ library, decoding one projection matrix at a time and the vocabulary head in bounded chunks, but it is slower. Packed exports are inference-only; \`--init-from model.qmini.npz\` supports a later training stage by dequantizing each tensor into a separately allocated trainable model. The resumable \`latest.pt\` training checkpoint remains outside the final deployment folder.
 
 The 2-bit representation is aggressive quantization. Its file size does not establish model quality. Compare quantized output against held-out language, maths, logic, instruction-following and multi-turn tests. CPU execution is implemented, but per-device tokens/second, memory peak and thermal behavior require an actual device benchmark.
+
+
+## 16. 4GB-device planning versus measured support
+
+The 5B configuration is **5,132,630,288 total parameters** with **852,873,488 unique Top-1 active parameters per token**. A single-expert dense reference, \`configs/qmini_dense_853m.json\`, has **852,350,993 parameters**, giving a comparable active-parameter reference for controlled quality/latency comparisons. This does not prove that sparse MoE is better; both profiles need the same data, compute budget and held-out evaluation.
+
+The current plan estimates:
+- Packed 5B model-weight artifact: **1,294,831,200 bytes**.
+- Persistent CPU stream caches, batch 1: **80,560,128 bytes**.
+- Conservative model-level CPU working set: **1,409,117,792 bytes**.
+
+The working-set estimate excludes the Python/PyTorch baseline, allocator fragmentation, OS memory, tokenizer, archive-decompression overlap, and any app process. It is not a measured peak-RSS number. Therefore Q-Mini has a low-file-size packed format and a CPU code path, but **4GB phone support is not yet proven**. Run the trained model benchmark on the exact device and record actual RSS, time-to-first-token, decode tokens/sec, thermals and quality.
+
+Near-duplicate data leakage can be reduced with the disk-backed SimHash grouping option. Use the **same** value when training the tokenizer and preparing token streams:
+
+\`\`\`bash
+python -m qmini.cli tokenizer --help
+python -m qmini.cli prepare --help
+\`\`\`
+
+The default \`--near-duplicate-hamming-distance 0\` keeps exact-deduplication behavior. Values 1–3 group similar word-trigram SimHashes before assigning whole groups to train/validation; the grouping threshold is recorded in \`dataset.json\`.
