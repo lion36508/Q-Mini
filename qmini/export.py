@@ -12,70 +12,138 @@ from .config import QMiniConfig
 from .quantization import pack_quaternary, unpack_quaternary
 
 
+def _write_npz_array(archive: Any, key: str, value: np.ndarray) -> None:
+    """Write one NPY member into an NPZ ZIP archive without buffering the whole archive."""
+    with archive.open(f"{key}.npy", mode="w", force_zip64=True) as handle:
+        np.lib.format.write_array(handle, np.asarray(value), allow_pickle=False)
+
+
+def export_packed_state_stream(
+    state_items: Any,
+    config: QMiniConfig,
+    output_path: str | Path,
+) -> Path:
+    """Stream named tensors into a Q2-v2 NPZ without retaining the full state dict.
+
+    Each rank-2+ tensor is packed immediately as Q2-v2. One-dimensional
+    parameters are stored as FP16 and per-row scales as FP32. The caller may
+    yield tensors from one module at a time, which avoids allocating a dense
+    multi-billion-parameter model just to create its deployment artifact.
+    """
+    import os
+    import zipfile
+
+    config.validate()
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".tmp")
+    specs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    parameter_count = 0
+
+    try:
+        with zipfile.ZipFile(
+            temporary,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=1,
+            allowZip64=True,
+        ) as archive:
+            for index, item in enumerate(state_items):
+                if not isinstance(item, (tuple, list)) or len(item) != 2:
+                    raise TypeError("state_items must yield (name, tensor) pairs.")
+                name, tensor = item
+                if not isinstance(name, str) or not name or name in seen:
+                    raise ValueError(f"Missing or duplicate state tensor name: {name!r}")
+                if not isinstance(tensor, torch.Tensor):
+                    raise TypeError(f"State value for {name} is not a torch.Tensor.")
+                if tensor.ndim < 1 or any(int(size) < 1 for size in tensor.shape):
+                    raise ValueError(f"State tensor {name} has an invalid shape.")
+                seen.add(name)
+                shape = [int(size) for size in tensor.shape]
+                parameter_count += int(tensor.numel())
+
+                value = tensor.detach().to(
+                    device="cpu", dtype=torch.float32
+                ).contiguous()
+                if not torch.isfinite(value).all():
+                    raise ValueError(f"Non-finite state tensor rejected: {name}")
+
+                if value.ndim >= 2:
+                    rows = int(value.shape[0])
+                    flat = value.reshape(rows, -1)
+                    packed, scales = pack_quaternary(flat)
+                    packed_key, scale_key = f"p_{index}", f"s_{index}"
+                    _write_npz_array(archive, packed_key, packed)
+                    _write_npz_array(archive, scale_key, scales)
+                    specs.append({
+                        "name": name,
+                        "kind": "q2",
+                        "shape": shape,
+                        "packed_key": packed_key,
+                        "scale_key": scale_key,
+                        "in_features": int(flat.shape[1]),
+                    })
+                else:
+                    value_key = f"f_{index}"
+                    _write_npz_array(
+                        archive, value_key, value.numpy().astype(np.float16)
+                    )
+                    specs.append({
+                        "name": name,
+                        "kind": "fp16",
+                        "shape": shape,
+                        "value_key": value_key,
+                    })
+
+            expected_parameters = config.estimated_parameter_count()
+            if parameter_count != expected_parameters:
+                raise ValueError(
+                    f"Streamed state has {parameter_count:,} parameters; "
+                    f"config expects {expected_parameters:,}."
+                )
+
+            codebook = {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0}
+            metadata = {
+                "format": "qmini-packed-v2",
+                "q2_contract": {
+                    "version": 2,
+                    "codebook": codebook,
+                    "row_scale": "2 * mean(abs(original_output_row))",
+                    "all_zero_row_scale": 0.0,
+                },
+                "config": config.to_dict(),
+                "tensor_count": len(specs),
+                "quaternary_tensor_count": sum(
+                    item["kind"] == "q2" for item in specs
+                ),
+                "fp16_tensor_count": sum(
+                    item["kind"] == "fp16" for item in specs
+                ),
+                "tensors": specs,
+                "quaternary_codes": codebook,
+            }
+            _write_npz_array(
+                archive,
+                "metadata_json",
+                np.asarray(json.dumps(metadata, separators=(",", ":"))),
+            )
+
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
 def export_packed_state(
     state_dict: dict[str, torch.Tensor],
     config: QMiniConfig,
     output_path: str | Path,
 ) -> Path:
-    """Write a portable NPZ snapshot with packed 2-bit matrices and FP16 metadata tensors.
-
-    Every tensor with rank >= 2 is row-wise quaternary packed. Biases and normalization
-    vectors are kept as FP16. This is a storage/export format, not a native runtime.
-    """
-    config.validate()
-    target = Path(output_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    arrays: dict[str, np.ndarray] = {}
-    specs: list[dict[str, Any]] = []
-
-    for index, (name, tensor) in enumerate(state_dict.items()):
-        value = tensor.detach().to(device="cpu", dtype=torch.float32).contiguous().numpy()
-        if value.ndim >= 2:
-            shape = list(value.shape)
-            rows = shape[0]
-            flat = torch.from_numpy(value.reshape(rows, -1))
-            packed, scales = pack_quaternary(flat)
-            packed_key, scale_key = f"p_{index}", f"s_{index}"
-            arrays[packed_key] = packed
-            arrays[scale_key] = scales
-            specs.append({
-                "name": name,
-                "kind": "q2",
-                "shape": shape,
-                "packed_key": packed_key,
-                "scale_key": scale_key,
-                "in_features": int(flat.shape[1]),
-            })
-        else:
-            value_key = f"f_{index}"
-            arrays[value_key] = value.astype(np.float16)
-            specs.append({"name": name, "kind": "fp16", "shape": list(value.shape), "value_key": value_key})
-
-    metadata = {
-        "format": "qmini-packed-v2",
-        "q2_contract": {
-            "version": 2,
-            "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
-            "row_scale": "2 * mean(abs(original_output_row))",
-            "all_zero_row_scale": 0.0,
-        },
-        "config": config.to_dict(),
-        "tensor_count": len(specs),
-        "quaternary_tensor_count": sum(item["kind"] == "q2" for item in specs),
-        "fp16_tensor_count": sum(item["kind"] == "fp16" for item in specs),
-        "tensors": specs,
-        "quaternary_codes": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
-    }
-    arrays["metadata_json"] = np.asarray(json.dumps(metadata, separators=(",", ":")))
-    temporary = target.with_name(target.name + ".tmp")
-    try:
-        with temporary.open("wb") as handle:
-            np.savez_compressed(handle, **arrays)
-            handle.flush()
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return target
+    """Write a portable Q2-v2 NPZ snapshot from an in-memory state dictionary."""
+    return export_packed_state_stream(state_dict.items(), config, output_path)
 
 
 def reconstruct_packed_state(path: str | Path) -> tuple[QMiniConfig, dict[str, np.ndarray]]:
