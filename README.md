@@ -357,3 +357,6 @@ The notebook now defaults to a small, reproducible learning-proof run: fixed-see
 New packed model exports use **Q2-v2**: normalized matrix symbols {-1.0, -0.5, +0.5, +1.0} with codes 00, 01, 10, 11 respectively and an FP32 row scale equal to 2 * mean(abs(original_output_row)). An all-zero row uses scale zero and reconstructs exactly to zero; exact zeros within a non-zero row map to the positive half-symbol because the four-symbol production alphabet has no zero code. Activations remain INT8, while biases and one-dimensional metadata vectors remain FP16 in packed archives.
 
 Existing Q2-v1 archives ({-2,-1,+1,+2} with legacy scales) remain readable. New exports never write v1. The native C++ projection uses a versioned Q2-v2 ABI and applies the same decode/scaling rule as the Python fallback. See docs/Q2_QUANTIZATION_SPEC.md for the normative contract and tests.
+
+
+For a small Q-Mini-owned checkpoint, the quantization ablation can additionally measure held-out NLL/perplexity using `--eval-tokens PATH --eval-seq-len 128 --eval-batches 100 --eval-seed 42`. For response-only evaluation add `--eval-mask PATH`. All candidate formats use the same validation stream and INT8 activation path. The default 10M-parameter evaluation cap bounds memory use; weight-error-only reports remain available for larger checkpoints.
