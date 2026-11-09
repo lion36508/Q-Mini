@@ -192,7 +192,7 @@ def generate(
 
 
 _CONTROL_CHAT_ROLE = re.compile(r"<\|(system|user|assistant|tool|other)\|>")
-_LEGACY_CHAT_ROLE = re.compile(r"(?m)^\[(USER|ASSISTANT)\]\n")
+_LEGACY_CHAT_ROLE = re.compile(r"(?m)^\[(SYSTEM|USER|ASSISTANT)\]\n")
 
 
 def _complete_chat_turns(
