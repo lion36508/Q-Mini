@@ -245,8 +245,8 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 - A random initialization is not a useful assistant. Real capability requires enough high-quality training data, compute and independent evaluation.
 - The current baseline is a compact research model, not a large foundation model or a claim of state-of-the-art performance.
 - FP32 master weights and optimizer states are used in training.
-- The packed archive is not yet a complete integer-only runtime.
-- The native kernel accelerates CPU linear projections only; convolution, normalization, embedding lookup and MoE dispatch remain on the PyTorch reference path.
+- The packed archive now has a low-memory CPU inference path; it is a hybrid runtime, not a fully integer-only graph.
+- The native kernel accelerates dense CPU linear projections; convolution, normalization, embedding lookup and MoE dispatch still use PyTorch.
 - There are no bundled trained weights or private datasets.
 - Local memory is stored in the path supplied by the user; protect that database as personal data and export/delete records deliberately.
 - The GitHub repository is public. Never commit credentials, private datasets, personal information or private checkpoints. Keep such artifacts in private storage.
@@ -295,3 +295,19 @@ The training loop aggregates assistant-response loss by supervised target-token 
 A new instruction/SFT run can initialize from `final_model/model.pt` using `--init-from`. Only the model state dictionary is loaded; the fine-tuning stage gets a fresh optimizer. Its source model hash/path is saved in the run manifest and verified when resuming the SFT run. Use an assistant-only loss mask for structured conversations.
 
 These additions improve architectural coverage and training correctness. They do not prove natural conversational ability. That still requires real training, held-out multi-turn evaluation and measured improvements.
+
+
+## 15. 5B deployment size and CPU inference
+
+The 5B profile contains 5,132,630,288 parameters. Its exact row-padded Q2 + FP32 row-scale + FP16 vector layout is estimated at **1,294,691,936 bytes** (about 1.295 GB decimal / 1.206 GiB), below the 1.5 GB model-weight artifact budget. This is a pre-training layout estimate; the actual exported archive is measured and written to \`model_manifest.json\`. Tokenizer and application files are additional.
+
+Large final model folders omit the redundant FP32 \`model.pt\` and keep \`model.qmini.npz\`. The default loader uses the packed CPU runtime without creating 5B dense FP32 matrices. A compiled C++ kernel is recommended for speed:
+
+\`\`\`bash
+python -m qmini.native --build
+python -m qmini.cli generate --model-dir /path/to/final_model --prompt "Explain photosynthesis."
+\`\`\`
+
+The PyTorch fallback still works without the C++ library, decoding one projection matrix at a time and the vocabulary head in bounded chunks, but it is slower. Packed exports are inference-only; \`--init-from model.qmini.npz\` supports a later training stage by dequantizing each tensor into a separately allocated trainable model. The resumable \`latest.pt\` training checkpoint remains outside the final deployment folder.
+
+The 2-bit representation is aggressive quantization. Its file size does not establish model quality. Compare quantized output against held-out language, maths, logic, instruction-following and multi-turn tests. CPU execution is implemented, but per-device tokens/second, memory peak and thermal behavior require an actual device benchmark.
