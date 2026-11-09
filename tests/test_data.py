@@ -215,3 +215,60 @@ def test_chat_ending_with_assistant_trains_document_eos(tmp_path):
 def test_empty_records_return_a_complete_segment_contract():
     assert _record_segments("") == ([], False, False, False)
     assert _encode_record("", None, 0, 1, "auto") is None
+
+
+def test_large_top_level_json_array_is_incrementally_decoded(tmp_path):
+    from qmini.data import iter_source_records
+
+    source = tmp_path / "large-array.json"
+    rows = [
+        {"id": index, "text": f"document-{index}-" + ("x" * 1800)}
+        for index in range(90)
+    ]
+    source.write_text(json.dumps(rows), encoding="utf-8")
+    parsed = list(iter_source_records([source]))
+    assert len(parsed) == len(rows)
+    assert parsed[0]["id"] == 0
+    assert parsed[-1]["id"] == 89
+    assert parsed[-1]["text"].endswith("x" * 1800)
+
+
+def test_json_object_reader_and_private_source_manifest_paths(tmp_path):
+    source = tmp_path / "private-datasets" / "corpus.json"
+    source.parent.mkdir()
+    rows = [
+        {"text": "A first independent source document with enough words."},
+        {"text": "A second independent source document with enough words."},
+        {"text": "A third independent source document with enough words."},
+    ]
+    source.write_text(json.dumps({"records": rows}), encoding="utf-8")
+    assert len(list(iter_text_records([source]))) == 1
+
+    tokenizer_source = tmp_path / "tokenizer-source.jsonl"
+    tokenizer_source.write_text(
+        "\n".join(json.dumps(item) for item in rows), encoding="utf-8"
+    )
+    tokenizer_path = tmp_path / "tokenizer.json"
+    train_tokenizer([tokenizer_source], tokenizer_path, vocab_size=300, min_frequency=1)
+
+    default_output = tmp_path / "prepared-default"
+    prepare_token_streams(
+        [source], tokenizer_path, default_output, valid_fraction=0.1, loss_mask_mode="all"
+    )
+    manifest_text = (default_output / "dataset.json").read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    assert manifest["source_files"][0]["path"] == source.name
+    assert "absolute_path" not in manifest["source_files"][0]
+    assert str(tmp_path) not in manifest_text
+    assert manifest["source_files"][0]["sha256"]
+
+    explicit_output = tmp_path / "prepared-explicit"
+    prepare_token_streams(
+        [source], tokenizer_path, explicit_output, valid_fraction=0.1,
+        loss_mask_mode="all", include_absolute_source_paths=True,
+    )
+    explicit = json.loads(
+        (explicit_output / "dataset.json").read_text(encoding="utf-8")
+    )
+    assert explicit["source_files"][0]["absolute_path"] == str(source.resolve())
+    assert explicit["absolute_source_paths_included"] is True
