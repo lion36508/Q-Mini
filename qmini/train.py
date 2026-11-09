@@ -79,6 +79,83 @@ def _load_masks(path: str | Path | None, tokens: np.memmap, name: str) -> np.mem
     return masks
 
 
+class SupervisedWindowIndex:
+    """Disk-backed, bounded-memory index of windows containing target tokens.
+
+    The index stores only one count per start-position block. During sampling,
+    a selected block is scanned once to choose uniformly among its valid
+    windows. This preserves uniform sampling over all valid windows without
+    retaining every positive start position in RAM.
+    """
+
+    def __init__(
+        self,
+        masks: np.ndarray,
+        token_count: int,
+        seq_len: int,
+        block_size: int = 1 << 20,
+    ):
+        if seq_len < 1 or token_count < seq_len + 2:
+            raise ValueError("A supervised window index requires a legal sequence window.")
+        if len(masks) != token_count:
+            raise ValueError("Loss-mask length must match its token stream.")
+        if block_size < 1:
+            raise ValueError("block_size must be positive.")
+
+        self.masks = masks
+        self.seq_len = int(seq_len)
+        self.max_start = int(token_count - seq_len - 1)
+        self.block_size = int(block_size)
+        self.blocks: list[tuple[int, int]] = []
+        self.valid_window_counts: list[int] = []
+
+        for start in range(0, self.max_start + 1, self.block_size):
+            count = min(self.block_size, self.max_start + 1 - start)
+            self.blocks.append((start, count))
+            self.valid_window_counts.append(
+                int(self._valid_offsets(start, count).size)
+            )
+
+        self.total_valid_windows = sum(self.valid_window_counts)
+        if self.total_valid_windows == 0:
+            raise ValueError(
+                "Loss mask has no supervised target inside any legal training window. "
+                "Move at least one target to positions 1..N-1 or increase seq_len."
+            )
+
+        weights = np.asarray(self.valid_window_counts, dtype=np.float64)
+        self.block_probabilities = weights / weights.sum()
+
+    def _valid_offsets(self, block_start: int, start_count: int) -> np.ndarray:
+        # For start s, labels are masks[s+1:s+seq_len+1]. This single
+        # bounded read contains the union of all windows in the selected block.
+        values = np.asarray(
+            self.masks[
+                block_start + 1:block_start + start_count + self.seq_len
+            ],
+            dtype=np.uint8,
+        )
+        prefix = np.empty(values.size + 1, dtype=np.int64)
+        prefix[0] = 0
+        np.cumsum(values, dtype=np.int64, out=prefix[1:])
+        counts = prefix[self.seq_len:self.seq_len + start_count] - prefix[:start_count]
+        return np.flatnonzero(counts > 0)
+
+    def sample_start(self, rng: np.random.Generator) -> int:
+        block_index = int(
+            rng.choice(len(self.blocks), p=self.block_probabilities)
+        )
+        block_start, start_count = self.blocks[block_index]
+        valid_offsets = self._valid_offsets(block_start, start_count)
+        if valid_offsets.size == 0:
+            raise RuntimeError(
+                "Supervised-window index changed after construction; "
+                "the loss mask may have been modified."
+            )
+        offset = int(valid_offsets[int(rng.integers(0, valid_offsets.size))])
+        return block_start + offset
+
+
 def _sample_batch(
     tokens: np.memmap,
     masks: np.memmap | None,
@@ -86,6 +163,7 @@ def _sample_batch(
     seq_len: int,
     rng: np.random.Generator,
     device: torch.device,
+    window_index: SupervisedWindowIndex | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     max_start = len(tokens) - seq_len - 1
     if max_start < 0:
@@ -95,24 +173,26 @@ def _sample_batch(
 
     samples = []
     target_masks = []
+    if masks is not None:
+        window_index = window_index or SupervisedWindowIndex(
+            masks, len(tokens), seq_len
+        )
+        if window_index.max_start != max_start or window_index.seq_len != seq_len:
+            raise ValueError("Supervised-window index does not match this token stream and sequence length.")
+
     for _row in range(batch_size):
-        selected = None
-        for _attempt in range(128):
-            start = int(rng.integers(0, max_start + 1))
-            label_mask = (
-                np.ones(seq_len, dtype=np.uint8)
-                if masks is None
-                else np.asarray(masks[start + 1:start + seq_len + 1], dtype=np.uint8)
-            )
-            if int(label_mask.sum()) > 0:
-                selected = start, label_mask
-                break
-        if selected is None:
-            raise ValueError(
-                "Could not sample a sequence containing supervised targets. "
-                "Increase seq_len or provide denser assistant-response labels."
-            )
-        start, label_mask = selected
+        start = (
+            int(rng.integers(0, max_start + 1))
+            if masks is None
+            else window_index.sample_start(rng)
+        )
+        label_mask = (
+            np.ones(seq_len, dtype=np.uint8)
+            if masks is None
+            else np.asarray(masks[start + 1:start + seq_len + 1], dtype=np.uint8)
+        )
+        if int(label_mask.sum()) <= 0:
+            raise RuntimeError("Selected training window unexpectedly contains no supervised targets.")
         samples.append(np.asarray(tokens[start:start + seq_len + 1], dtype=np.int64))
         target_masks.append(label_mask)
 
@@ -158,6 +238,7 @@ def _evaluate(
     batches: int,
     device: torch.device,
     seed: int,
+    window_index: SupervisedWindowIndex | None = None,
 ) -> dict[str, float | None]:
     was_training = model.training
     model.eval()
@@ -168,7 +249,8 @@ def _evaluate(
         with torch.inference_mode():
             for _ in range(batches):
                 x, y, target_mask = _sample_batch(
-                    tokens, masks, batch_size, seq_len, rng, device
+                    tokens, masks, batch_size, seq_len, rng, device,
+                    window_index=window_index,
                 )
                 result = model(x)
                 nll_sum, target_count = _masked_cross_entropy_sum(
@@ -484,6 +566,16 @@ def train_model(
             f"Both streams need at least {seq_len + 2} tokens for sequence length {seq_len}."
         )
 
+    # Build bounded-memory indexes once, before allocating the model/optimizer.
+    train_window_index = (
+        SupervisedWindowIndex(train_masks, len(train_tokens), seq_len)
+        if train_masks is not None else None
+    )
+    valid_window_index = (
+        SupervisedWindowIndex(valid_masks, len(valid_tokens), seq_len)
+        if valid_masks is not None else None
+    )
+
     actual_seed = config.seed if seed is None else int(seed)
     contract = _resume_contract(
         train_bin, valid_bin, tokenizer_path, train_mask_bin, valid_mask_bin,
@@ -679,7 +771,10 @@ def train_model(
         # Weight assistant-response loss by supervised target count over the
         # complete optimizer batch, not by an unweighted mean of microbatches.
         microbatches = [
-            _sample_batch(train_tokens, train_masks, batch_size, seq_len, rng, device)
+            _sample_batch(
+                train_tokens, train_masks, batch_size, seq_len, rng, device,
+                window_index=train_window_index,
+            )
             for _ in range(grad_accum)
         ]
         total_supervised_targets = sum(
@@ -764,6 +859,7 @@ def train_model(
             record.update(_evaluate(
                 model, valid_tokens, valid_masks, batch_size, seq_len, eval_batches,
                 device, actual_seed + completed,
+                window_index=valid_window_index,
             ))
         if use_amp:
             record["peak_cuda_memory_bytes"] = int(torch.cuda.max_memory_allocated())
