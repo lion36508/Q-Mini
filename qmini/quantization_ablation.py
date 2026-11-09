@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 from qmini.config import QMiniConfig
