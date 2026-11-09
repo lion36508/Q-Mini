@@ -93,6 +93,9 @@ class QLinear(nn.Linear):
     """Quaternary weight-aware projection with per-token INT8 fake quantization."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "_qmini_packed_weight", None) is not None:
+            from .packed_runtime import packed_linear_forward
+            return packed_linear_forward(self, x, self.bias)
         native_output = _try_native_linear(self, x, self.weight, self.bias)
         if native_output is not None:
             return native_output
@@ -111,9 +114,15 @@ class QEmbedding(nn.Module):
         return _cached_quantized_weight(self, self.weight)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "_qmini_packed_weight", None) is not None:
+            from .packed_runtime import packed_embedding_lookup
+            return packed_embedding_lookup(self, token_ids)
         return fake_quantize_int8(F.embedding(token_ids, self.quantized_weight()))
 
     def project(self, hidden: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "_qmini_packed_weight", None) is not None:
+            from .packed_runtime import packed_linear_forward
+            return packed_linear_forward(self, hidden, None)
         native_output = _try_native_linear(self, hidden, self.weight, None)
         if native_output is not None:
             return native_output
@@ -138,6 +147,20 @@ class CausalGatedDepthwiseConv(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def _kernel(self) -> torch.Tensor:
+        if getattr(self, "_qmini_packed_weight", None) is not None:
+            cached = getattr(self, "_qmini_depthwise_dequantized", None)
+            if cached is None:
+                from .quantization import unpack_quaternary
+                dense = unpack_quaternary(
+                    self._qmini_packed_weight.detach().cpu().numpy(),
+                    self._qmini_weight_scales.detach().cpu().numpy(),
+                    self.kernel_size,
+                )
+                cached = torch.from_numpy(dense).reshape(
+                    self.dim, 1, self.kernel_size
+                )
+                self._qmini_depthwise_dequantized = cached
+            return cached
         quantized = _cached_quantized_weight(
             self, self.depthwise_weight.reshape(self.dim, self.kernel_size)
         )
@@ -152,7 +175,7 @@ class CausalGatedDepthwiseConv(nn.Module):
         mixed = F.conv1d(
             content,
             self._kernel(),
-            self.depthwise_bias,
+            self.depthwise_bias.float(),
             stride=1,
             padding=0,
             dilation=self.dilation,
@@ -188,7 +211,7 @@ class CausalGatedDepthwiseConv(nn.Module):
         mixed = F.conv1d(
             window.transpose(1, 2),
             self._kernel(),
-            self.depthwise_bias,
+            self.depthwise_bias.float(),
             stride=1,
             padding=0,
             dilation=self.dilation,
@@ -573,6 +596,9 @@ class QMiniMoE(nn.Module):
         }, new_state
 
     def parameter_report(self) -> dict[str, int]:
+        if getattr(self, "_qmini_packed_runtime", False):
+            total = int(self._qmini_original_parameter_count)
+            return {"total": total, "trainable": 0, "non_trainable": total}
         return {
             "total": sum(p.numel() for p in self.parameters()),
             "trainable": sum(p.numel() for p in self.parameters() if p.requires_grad),
