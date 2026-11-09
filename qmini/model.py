@@ -200,6 +200,83 @@ class CausalGatedDepthwiseConv(nn.Module):
         return output, next_cache
 
 
+class GatedStateSpaceMixer(nn.Module):
+    """Q-Mini gated diagonal SSM with a parallel training scan and recurrent inference.
+
+    This is not an implementation of Mamba or RWKV. The causal update is:
+        state[t] = decay[t] * state[t-1] + (1-decay[t]) * drive[t]
+    """
+
+    def __init__(self, dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.dim = dim
+        self.state_input = QLinear(dim, dim)
+        self.state_decay = QLinear(dim, dim)
+        self.state_gate = QLinear(dim, dim)
+        self.output = QLinear(dim, dim)
+        nn.init.zeros_(self.state_decay.weight)
+        if self.state_decay.bias is not None:
+            nn.init.constant_(self.state_decay.bias, -2.0)
+        self.dropout = nn.Dropout(dropout)
+
+    @staticmethod
+    def parallel_scan(decay: torch.Tensor, injection: torch.Tensor) -> torch.Tensor:
+        """Differentiable associative prefix scan of affine recurrent updates."""
+        if decay.ndim != 3 or injection.shape != decay.shape:
+            raise ValueError("decay and injection must share [batch, sequence, features] shape.")
+        if decay.shape[1] < 1:
+            raise ValueError("State-space scan requires a non-empty sequence.")
+        a, b = decay.float(), injection.float()
+        offset, length = 1, decay.shape[1]
+        while offset < length:
+            previous_a, previous_b = a, b
+            earlier_a = torch.cat(
+                (torch.ones_like(previous_a[:, :offset]), previous_a[:, :-offset]),
+                dim=1,
+            )
+            earlier_b = torch.cat(
+                (torch.zeros_like(previous_b[:, :offset]), previous_b[:, :-offset]),
+                dim=1,
+            )
+            # Compose the current affine update after the earlier prefix.
+            b = previous_b + previous_a * earlier_b
+            a = previous_a * earlier_a
+            offset *= 2
+        return b
+
+    def _drive_and_decay(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        drive = torch.tanh(self.state_input(x)).float()
+        decay = torch.exp(-F.softplus(self.state_decay(x).float())).clamp_min(1e-6)
+        return drive, decay
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3 or x.shape[-1] != self.dim:
+            raise ValueError("State-space input must have shape [batch, sequence, d_model].")
+        drive, decay = self._drive_and_decay(x)
+        states = self.parallel_scan(decay, (1.0 - decay) * drive)
+        gated = states.to(dtype=x.dtype) * torch.sigmoid(self.state_gate(x))
+        return self.dropout(self.output(gated))
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        state: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if x.ndim != 2 or x.shape[-1] != self.dim:
+            raise ValueError("Streaming state-space input must have shape [batch, d_model].")
+        drive = torch.tanh(self.state_input(x)).float()
+        decay = torch.exp(-F.softplus(self.state_decay(x).float())).clamp_min(1e-6)
+        if state is None:
+            state = torch.zeros_like(drive)
+        elif state.shape != drive.shape:
+            raise ValueError("State-space cache has an incompatible shape.")
+        elif state.device != drive.device:
+            raise ValueError("State-space cache device differs from the model.")
+        next_state = decay * state.float() + (1.0 - decay) * drive
+        gated = next_state.to(dtype=x.dtype) * torch.sigmoid(self.state_gate(x))
+        return self.dropout(self.output(gated)), next_state
+
+
 class SparseExpert(nn.Module):
     def __init__(self, dim: int, hidden: int):
         super().__init__()
@@ -259,11 +336,21 @@ class QMiniBlock(nn.Module):
         super().__init__()
         self.mix_norm = RMSNorm(config.d_model, config.rms_norm_eps)
         self.mixer = CausalGatedDepthwiseConv(config, dilation)
+        self.state_norm = (
+            RMSNorm(config.d_model, config.rms_norm_eps)
+            if config.use_state_space else None
+        )
+        self.state_mixer = (
+            GatedStateSpaceMixer(config.d_model, config.dropout)
+            if config.use_state_space else None
+        )
         self.moe_norm = RMSNorm(config.d_model, config.rms_norm_eps)
         self.moe = SparseTop1MoE(config)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = x + self.mixer(self.mix_norm(x))
+        if self.state_mixer is not None:
+            x = x + self.state_mixer(self.state_norm(x))
         expert_output, aux_loss, counts = self.moe(self.moe_norm(x))
         return x + expert_output, aux_loss, counts
 
@@ -271,11 +358,21 @@ class QMiniBlock(nn.Module):
         self,
         x: torch.Tensor,
         cache: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state_cache: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor | None,
+    ]:
         mixed, next_cache = self.mixer.forward_step(self.mix_norm(x), cache)
         x = x + mixed
+        next_state = state_cache
+        if self.state_mixer is not None:
+            state_output, next_state = self.state_mixer.forward_step(
+                self.state_norm(x), state_cache
+            )
+            x = x + state_output
         expert_output, aux_loss, counts = self.moe.forward_step(self.moe_norm(x))
-        return x + expert_output, aux_loss, counts, next_cache
+        return x + expert_output, aux_loss, counts, next_cache, next_state
 
 
 @dataclass
@@ -283,6 +380,7 @@ class QMiniStreamState:
     """Per-layer causal-convolution history for incremental autoregressive decoding."""
 
     caches: list[torch.Tensor | None]
+    state_spaces: list[torch.Tensor | None]
     thinking_steps: int
     batch_size: int
     tokens_processed: int = 0
@@ -340,14 +438,26 @@ class QMiniMoE(nn.Module):
         x = self.embedding(input_ids.long())
         aux_losses: list[torch.Tensor] = []
         router_counts: list[torch.Tensor] = []
-        for block in self.blocks:
-            x, aux, counts = block(x)
-            aux_losses.append(aux)
-            router_counts.append(counts)
-        for _ in range(steps):
-            x, aux, counts = self.refinement(x)
-            aux_losses.append(aux)
-            router_counts.append(counts)
+        if self.training and self.config.gradient_checkpointing:
+            from torch.utils.checkpoint import checkpoint
+
+            for block in self.blocks:
+                x, aux, counts = checkpoint(block, x, use_reentrant=False)
+                aux_losses.append(aux)
+                router_counts.append(counts)
+            for _ in range(steps):
+                x, aux, counts = checkpoint(self.refinement, x, use_reentrant=False)
+                aux_losses.append(aux)
+                router_counts.append(counts)
+        else:
+            for block in self.blocks:
+                x, aux, counts = block(x)
+                aux_losses.append(aux)
+                router_counts.append(counts)
+            for _ in range(steps):
+                x, aux, counts = self.refinement(x)
+                aux_losses.append(aux)
+                router_counts.append(counts)
         logits = self.embedding.project(self.final_norm(x))
         return {
             "logits": logits,
@@ -365,8 +475,10 @@ class QMiniMoE(nn.Module):
         if batch_size < 1:
             raise ValueError("batch_size must be positive.")
         steps = self._resolve_thinking_steps(thinking_steps)
+        layer_count = self.config.n_layers + steps
         return QMiniStreamState(
-            caches=[None] * (self.config.n_layers + steps),
+            caches=[None] * layer_count,
+            state_spaces=[None] * layer_count,
             thinking_steps=steps,
             batch_size=batch_size,
         )
@@ -400,32 +512,40 @@ class QMiniMoE(nn.Module):
                 requested_steps = self._resolve_thinking_steps(thinking_steps)
                 if requested_steps != configured_steps:
                     raise ValueError("thinking_steps cannot change in the middle of a stream.")
-        if len(state.caches) != self.config.n_layers + state.thinking_steps:
+        expected_layers = self.config.n_layers + state.thinking_steps
+        if len(state.caches) != expected_layers or len(state.state_spaces) != expected_layers:
             raise ValueError("Streaming state does not match this model configuration.")
 
         x = self.embedding(input_ids.long())
         new_caches: list[torch.Tensor | None] = []
+        new_state_spaces: list[torch.Tensor | None] = []
         aux_losses: list[torch.Tensor] = []
         router_counts: list[torch.Tensor] = []
 
         for index, block in enumerate(self.blocks):
-            x, aux, counts, cache = block.forward_step(x, state.caches[index])
+            x, aux, counts, cache, memory_state = block.forward_step(
+                x, state.caches[index], state.state_spaces[index]
+            )
             new_caches.append(cache)
+            new_state_spaces.append(memory_state)
             aux_losses.append(aux)
             router_counts.append(counts)
 
         offset = self.config.n_layers
         for index in range(state.thinking_steps):
-            x, aux, counts, cache = self.refinement.forward_step(
-                x, state.caches[offset + index]
+            state_index = offset + index
+            x, aux, counts, cache, memory_state = self.refinement.forward_step(
+                x, state.caches[state_index], state.state_spaces[state_index]
             )
             new_caches.append(cache)
+            new_state_spaces.append(memory_state)
             aux_losses.append(aux)
             router_counts.append(counts)
 
         logits = self.embedding.project(self.final_norm(x))
         new_state = QMiniStreamState(
             caches=new_caches,
+            state_spaces=new_state_spaces,
             thinking_steps=state.thinking_steps,
             batch_size=state.batch_size,
             tokens_processed=state.tokens_processed + 1,
