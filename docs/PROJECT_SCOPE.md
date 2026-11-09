@@ -39,7 +39,7 @@ The convolution mentioned here is a text-sequence operator; it does not imply im
 | Kernel width | 10 |
 | Dilations | 1, 2, 4, 8, 16, 32 |
 | Shared refinement | 1–4 repeated passes |
-| Weight values | -2, -1, +1, +2 |
+| Production matrix-weight values | Q2-v2: -1.0, -0.5, +0.5, +1.0 (2 bits/symbol); Q2-v1 is legacy-read-only |
 | Activation path | Per-token INT8 fake quantization |
 
 Parameter accounting must be computed from the instantiated model. The convolution-only baseline has a finite receptive field determined by its dilation schedule. Hybrid profiles add causal compressed recurrent state without self-attention.
@@ -201,3 +201,6 @@ The single-expert dense profile bypasses router and router normalization because
 
 
 New production archives are Q2-v2 with normalized codebook, doubled-mean row scaling and exact-zero row handling. The normative format specification is docs/Q2_QUANTIZATION_SPEC.md; ternary/INT4/INT8 weight quantizers remain diagnostics only.
+
+
+The normative production codebook, row-scale formula, packed metadata, native ABI and legacy decoder are specified in `docs/Q2_QUANTIZATION_SPEC.md`. Ternary, INT4 and rowwise INT8 weight functions are diagnostics only; they are not production export or inference formats.
