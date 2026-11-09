@@ -28,3 +28,23 @@ def test_packed_export_roundtrip_matches_quaternary_projection(tiny_config, tmp_
     assert report["tensor_count"] == len(original)
     assert report["parameter_count"] == sum(t.numel() for t in original.values())
     assert report["context"] == tiny_config.max_context
+
+
+def test_verify_packed_export_does_not_expand_full_state(
+    tiny_config, tmp_path, monkeypatch
+):
+    import qmini.export as export_module
+
+    model = QMiniMoE(tiny_config)
+    target = export_packed_state(
+        model.state_dict(), tiny_config, tmp_path / "bounded.qmini.npz"
+    )
+
+    def forbidden_reconstruction(*args, **kwargs):
+        raise AssertionError("large-export verification must not reconstruct FP32 state")
+
+    monkeypatch.setattr(export_module, "reconstruct_packed_state", forbidden_reconstruction)
+    report = verify_packed_export(target)
+    assert report["parameter_count"] == tiny_config.estimated_parameter_count()
+    assert report["decoded_payload_bytes"] + 65536 == report["estimated_raw_layout_bytes"]
+    assert report["artifact_bytes"] == target.stat().st_size
