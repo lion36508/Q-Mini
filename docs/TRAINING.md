@@ -74,3 +74,10 @@ The optional SFT stage is disabled by default (\`RUN_OWN_CHECKPOINT_SFT = False\
 
 An NLL decrease or task-score increase on a small sample is evidence only for that run and dataset. Review sample counts and cases; do not generalize it to broad assistant capability.
 
+
+
+
+## Reliable sampling with sparse response masks
+
+When a prepared assistant-only mask contains very few positive target tokens, the trainer builds a disk-backed \`SupervisedWindowIndex\` once before model/optimizer allocation. It counts valid windows in bounded blocks and samples uniformly from all starts whose shifted label mask contains at least one supervised target. It preserves the exact alignment \`mask[start + 1:start + seq_len + 1]\`. It fails early only when the stream has no legal supervised window, rather than failing probabilistically after 128 random proposals.
+
