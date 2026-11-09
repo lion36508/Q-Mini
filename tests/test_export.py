@@ -60,3 +60,26 @@ def test_verify_packed_export_does_not_expand_full_state(
     assert report["parameter_count"] == tiny_config.estimated_parameter_count()
     assert report["decoded_payload_bytes"] + 65536 == report["estimated_raw_layout_bytes"]
     assert report["artifact_bytes"] == target.stat().st_size
+
+
+
+def test_verify_export_rejects_contradictory_q2_v2_codebook_metadata(
+    tiny_config, tmp_path
+):
+    model = QMiniMoE(tiny_config)
+    source = export_packed_state(
+        model.state_dict(), tiny_config, tmp_path / "source.qmini.npz"
+    )
+    corrupted = tmp_path / "wrong-codebook.qmini.npz"
+    with np.load(source, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    metadata = json.loads(str(arrays["metadata_json"].item()))
+    metadata["quaternary_codes"]["00"] = -2.0
+    arrays["metadata_json"] = np.asarray(
+        json.dumps(metadata, separators=(",", ":"))
+    )
+    np.savez_compressed(corrupted, **arrays)
+
+    import pytest
+    with pytest.raises(ValueError, match="contract/codebook metadata"):
+        verify_packed_export(corrupted)
