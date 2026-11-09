@@ -232,7 +232,7 @@ def test_q2_v2_all_zero_depthwise_row_survives_export_and_packed_inference(
     config = _packed_config(tiny_config)
     reference = QMiniMoE(config).eval()
     with torch.no_grad():
-        reference.blocks[0].conv.depthwise_weight[0].zero_()
+        reference.blocks[0].mixer.depthwise_weight[0].zero_()
 
     path = export_packed_state(
         reference.state_dict(), config, tmp_path / "q2-v2-zero-row.npz"
@@ -241,7 +241,7 @@ def test_q2_v2_all_zero_depthwise_row_survives_export_and_packed_inference(
     assert report["format"] == "qmini-packed-v2"
 
     packed = load_packed_model(path, expected_config=config)
-    convolution = packed.blocks[0].conv
+    convolution = packed.blocks[0].mixer
     assert convolution._qmini_q2_version == 2
     assert convolution._qmini_weight_scales[0].item() == 0.0
     kernel = convolution._kernel()
