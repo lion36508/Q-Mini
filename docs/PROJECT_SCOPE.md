@@ -16,7 +16,7 @@ The project is not an Android IDE, not an image model, not a multimodal model an
 - Legacy profiles use strictly causal left-padded 1D depthwise convolution. New hybrid profiles add a gated diagonal state-space recurrence with a differentiable parallel scan during training and an equivalent single-token recurrent update during streaming inference.
 - Decoder-only next-token language modeling, initialized from random parameters.
 - Sparse Top-1 expert routing in the current baseline.
-- Quaternary weight alphabet {-2, -1, +1, +2} with FP32 master parameters and STE.
+- Production Q2-v2 normalized weight alphabet {-1, -0.5, +0.5, +1} with FP32 master parameters and STE; legacy v1 archives remain readable.
 - Per-token AbsMax INT8 activation fake quantization with STE.
 - RMSNorm and residual paths.
 - Shared iterative refinement reuses one block for a configurable number of passes; it is not a symbolic proof engine.
@@ -198,3 +198,6 @@ The SSM scan, causality, packed runtime, stream cache bounds, data split integri
 
 
 The single-expert dense profile bypasses router and router normalization because a one-element softmax is identically 1 and its parameters have no useful gradient. Periodic validation loss is accumulated by total supervised target-token count, with that denominator recorded in training metrics.
+
+
+New production archives are Q2-v2 with normalized codebook, doubled-mean row scaling and exact-zero row handling. The normative format specification is docs/Q2_QUANTIZATION_SPEC.md; ternary/INT4/INT8 weight quantizers remain diagnostics only.
