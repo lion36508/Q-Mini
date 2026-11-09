@@ -278,3 +278,25 @@ def test_q2_v2_pack_and_qat_agree_for_tiny_nonzero_rows():
     assert scales[0] > 0.0
     assert scales[1] == 0.0
     assert np.array_equal(restored, fake)
+
+
+
+def test_quantization_component_classifier_and_scale_distribution_summary():
+    from qmini.quantization_ablation import _scale_summary, _weight_component
+
+    assert _weight_component("token_embedding.weight") == "embedding"
+    assert _weight_component("blocks.0.moe.router.weight") == "router"
+    assert _weight_component("blocks.0.moe.experts.3.up.weight") == "expert"
+    assert _weight_component("blocks.0.conv.depthwise_weight") == "convolution"
+    assert _weight_component("blocks.0.state_space.in_proj.weight") == "state_space"
+    assert _weight_component("lm_head.weight") == "output_projection"
+    assert _weight_component("final_norm.weight") == "other"
+
+    summary = _scale_summary(np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32))
+    assert summary["count"] == 4
+    assert summary["zero_count"] == 1
+    assert summary["min"] == 0.0
+    assert summary["median"] == pytest.approx(1.5)
+    assert summary["p95"] == pytest.approx(2.85)
+    assert summary["max"] == 3.0
+    assert summary["mean"] == pytest.approx(1.5)
