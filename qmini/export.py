@@ -93,8 +93,11 @@ def reconstruct_packed_state(path: str | Path) -> tuple[QMiniConfig, dict[str, n
                 "row_scale": "2 * mean(abs(original_output_row))",
                 "all_zero_row_scale": 0.0,
             }
-            if metadata.get("q2_contract") != expected_contract:
-                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
+            if (
+                metadata.get("q2_contract") != expected_contract
+                or metadata.get("quaternary_codes") != expected_contract["codebook"]
+            ):
+                raise ValueError("Q2-v2 archive contract/codebook metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         state: dict[str, np.ndarray] = {}
         for spec in metadata["tensors"]:
@@ -143,8 +146,11 @@ def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
                 "row_scale": "2 * mean(abs(original_output_row))",
                 "all_zero_row_scale": 0.0,
             }
-            if metadata.get("q2_contract") != expected_contract:
-                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
+            if (
+                metadata.get("q2_contract") != expected_contract
+                or metadata.get("quaternary_codes") != expected_contract["codebook"]
+            ):
+                raise ValueError("Q2-v2 archive contract/codebook metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         specs = metadata.get("tensors")
         if not isinstance(specs, list) or len(specs) != int(metadata.get("tensor_count", -1)):
