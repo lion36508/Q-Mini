@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -14,6 +15,14 @@ import torch
 
 from .generate import generate
 from .train import _load_masks, _load_tokens, _masked_cross_entropy, _sample_batch
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _unicode_word_tokens(text: str) -> list[str]:
@@ -386,6 +395,7 @@ def evaluate_task_file(
         "format": "qmini-task-evaluation-v2",
         "model_parameters": model.parameter_report()["total"],
         "dataset": str(Path(dataset_path)),
+        "dataset_sha256": _sha256_file(dataset_path),
         "examples": total,
         "task_pass_rate": passed / total,
         "task_pass_rate_wilson_95": _wilson_interval(passed, total),
@@ -683,6 +693,7 @@ def evaluate_conversation_file(
         "format": "qmini-conversation-evaluation-v1",
         "model_parameters": model.parameter_report()["total"],
         "dataset": str(Path(dataset_path)),
+        "dataset_sha256": _sha256_file(dataset_path),
         "conversations": conversations,
         "turns": total_turns,
         "task_pass_rate": passed / total_turns,
