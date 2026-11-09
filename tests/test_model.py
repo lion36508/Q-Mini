@@ -2,7 +2,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from qmini.model import QMiniMoE
+from qmini.config import QMiniConfig
+from qmini.model import GatedStateSpaceMixer, QMiniMoE
 
 
 def test_forward_shape_and_count(tiny_config):
@@ -129,3 +130,62 @@ def test_thinking_steps_arguments_are_strict_in_all_inference_paths(tiny_config)
         model.new_stream_state(batch_size=1, thinking_steps="1")
     with torch.inference_mode(), pytest.raises(TypeError, match="thinking_steps must be an integer"):
         model.forward_step(torch.tensor([1]), thinking_steps=True)
+
+def test_gated_state_space_parallel_scan_matches_sequential_recurrence():
+    torch.manual_seed(101)
+    decay = (torch.rand(2, 17, 5) * 0.8 + 0.1).requires_grad_()
+    injection = torch.randn(2, 17, 5, requires_grad=True)
+    actual = GatedStateSpaceMixer.parallel_scan(decay, injection)
+
+    state = torch.zeros(2, 5)
+    expected = []
+    for position in range(decay.shape[1]):
+        state = decay[:, position] * state + injection[:, position]
+        expected.append(state)
+    expected = torch.stack(expected, dim=1)
+
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
+    actual.square().mean().backward()
+    assert decay.grad is not None and torch.isfinite(decay.grad).all()
+    assert injection.grad is not None and torch.isfinite(injection.grad).all()
+
+
+def test_state_space_model_is_causal_and_streaming_matches_full_forward(tiny_config):
+    values = tiny_config.to_dict()
+    values["use_state_space"] = True
+    config = QMiniConfig.from_dict(values)
+    torch.manual_seed(102)
+    model = QMiniMoE(config).eval()
+    ids = torch.randint(0, config.vocab_size, (2, 19))
+    changed = ids.clone()
+    changed[:, 12:] = torch.randint(0, config.vocab_size, (2, 7))
+
+    with torch.inference_mode():
+        full = model(ids, thinking_steps=2)["logits"]
+        changed_full = model(changed, thinking_steps=2)["logits"]
+        state = None
+        streamed = []
+        for position in range(ids.shape[1]):
+            result, state = model.forward_step(
+                ids[:, position], state=state, thinking_steps=2
+            )
+            streamed.append(result["logits"])
+        incremental = torch.stack(streamed, dim=1)
+
+    assert torch.allclose(full[:, :12], changed_full[:, :12], atol=2e-5, rtol=2e-5)
+    assert torch.allclose(incremental, full, atol=3e-5, rtol=3e-5)
+    assert state is not None and len(state.state_spaces) == config.n_layers + 2
+    assert all(item is not None for item in state.state_spaces)
+
+
+def test_gradient_checkpointed_state_space_path_backpropagates(tiny_config):
+    values = tiny_config.to_dict()
+    values.update({"use_state_space": True, "gradient_checkpointing": True})
+    model = QMiniMoE(QMiniConfig.from_dict(values)).train()
+    ids = torch.randint(0, tiny_config.vocab_size, (2, 9))
+    result = model(ids)
+    loss = result["logits"].float().square().mean() + result["aux_loss"]
+    loss.backward()
+    grad = model.blocks[0].state_mixer.state_input.weight.grad
+    assert grad is not None and torch.isfinite(grad).all()
+    assert grad.abs().sum() > 0
