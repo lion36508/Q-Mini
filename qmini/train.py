@@ -485,17 +485,22 @@ def train_model(
         weight_decay=weight_decay,
     )
     if initial_model_path is not None and not resume:
-        try:
-            initial_state = torch.load(
-                initial_model_path, map_location=device, weights_only=True
-            )
-        except TypeError:
-            initial_state = torch.load(initial_model_path, map_location=device)
-        if not isinstance(initial_state, dict) or "format" in initial_state or "model" in initial_state:
-            raise ValueError(
-                "--init-from must point to final_model/model.pt, not a training checkpoint."
-            )
-        model.load_state_dict(initial_state, strict=True)
+        if initial_model_path.suffix.lower() == ".npz":
+            from .packed_runtime import load_packed_state_into_trainable_model
+            load_packed_state_into_trainable_model(model, initial_model_path)
+        else:
+            try:
+                initial_state = torch.load(
+                    initial_model_path, map_location=device, weights_only=True
+                )
+            except TypeError:
+                initial_state = torch.load(initial_model_path, map_location=device)
+            if not isinstance(initial_state, dict) or "format" in initial_state or "model" in initial_state:
+                raise ValueError(
+                    "--init-from must point to final_model/model.pt or a verified "
+                    "final_model/model.qmini.npz, not a training checkpoint."
+                )
+            model.load_state_dict(initial_state, strict=True)
         print(
             f"Initialized model weights from {initial_model_path}; "
             "the fine-tuning stage starts with a fresh optimizer."
@@ -775,7 +780,6 @@ def train_model(
 
     final_dir = run_dir / "final_model"
     final_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_torch_save(model.state_dict(), final_dir / "model.pt")
     config.save(final_dir / "config.json")
     if tokenizer_path is not None and Path(tokenizer_path).is_file():
         shutil.copy2(tokenizer_path, final_dir / "tokenizer.json")
@@ -784,8 +788,17 @@ def train_model(
     packed_path = export_packed_state(
         model.state_dict(), config, final_dir / "model.qmini.npz"
     )
+
+    # Keep a convenient dense snapshot for small research runs only. Large
+    # releases stay in the packed 2-bit deployment format; latest.pt remains
+    # the resumable training checkpoint outside final_model/.
+    dense_snapshot_budget = 256 * 1024 * 1024
+    dense_snapshot_included = config.estimated_parameter_count() * 4 <= dense_snapshot_budget
+    if dense_snapshot_included:
+        _atomic_torch_save(model.state_dict(), final_dir / "model.pt")
+
     final_report = {
-        "format": "qmini-final-model-v1",
+        "format": "qmini-final-model-v2",
         "step": steps,
         "tokens_seen": tokens_seen,
         "supervised_tokens_seen": supervised_tokens_seen,
@@ -793,6 +806,14 @@ def train_model(
         "parameters": model.parameter_report()["total"],
         "packed_export": packed_path.name,
         "packed_export_bytes": packed_path.stat().st_size,
+        "estimated_q2_fp16_raw_bytes": config.estimated_packed_export_bytes(),
+        "deployment_weight_budget_bytes": 1_500_000_000,
+        "within_1_5gb_weight_artifact_budget": (
+            config.estimated_packed_export_bytes() <= 1_500_000_000
+        ),
+        "dense_training_snapshot_included": dense_snapshot_included,
+        "dense_snapshot_budget_bytes": dense_snapshot_budget,
+        "resume_checkpoint": str(checkpoint_path),
         "config": config.to_dict(),
     }
     _atomic_json_save(final_report, final_dir / "model_manifest.json")
