@@ -339,3 +339,14 @@ The default \`--near-duplicate-hamming-distance 0\` keeps exact-deduplication be
 ## Streaming context semantics
 
 \`max_context\` is the maximum sequence length accepted by a single batch forward or initial prompt prefill. It is not a hard cap on the total number of tokens processed by an incremental stream. After prefill, the convolution caches remain fixed-size and the diagonal SSM retains a fixed-width learned state, so generation can continue without replaying the entire prompt after every token. This recurrent state is compressed memory, not exact access to every previous token. It therefore may preserve useful long-range information, but exact recall of arbitrary old details is not guaranteed.
+
+
+
+## Colab training and SFT stages
+
+The notebook now defaults to a small, reproducible learning-proof run: fixed-seed held-out NLL is measured before and after training. The 152M long run requires explicit \`RUN_LONG_TRAINING = True\` opt-in and is step-capped. Optional assistant SFT is also disabled by default; when enabled, it uses a separate licensed dataset, response-only masks, a tokenizer-bound Q-Mini checkpoint and fresh optimizer state. The notebook never downloads pretrained weights. A small learning-proof or smoke run is not evidence of general assistant quality.
+
+## Experimental quantization ablation
+
+\`scripts/quantization_ablation.py\` compares Q2, zero-preserving ternary and groupwise INT4 reconstruction against FP16 using either a Q-Mini final model or the Q-Mini run's own \`latest.pt\`. This is a weight-error experiment only; the Q2 production format remains unchanged until full held-out NLL, task quality, memory and speed comparisons are measured.
+
