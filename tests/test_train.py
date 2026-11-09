@@ -500,3 +500,50 @@ def test_supervised_window_index_samples_uniformly_from_valid_start_positions():
     rng = np.random.default_rng(91)
     observed = {index.sample_start(rng) for _ in range(1000)}
     assert observed == valid_starts
+
+
+
+def test_finetuning_initializes_from_new_q2_v2_packed_artifact(
+    tmp_path, tiny_config
+):
+    from qmini.export import export_packed_state
+    from qmini.model import QMiniMoE
+
+    train_bin = tmp_path / "packed-train.bin"
+    valid_bin = tmp_path / "packed-valid.bin"
+    _write_stream(train_bin, tiny_config.vocab_size, 256, 601)
+    _write_stream(valid_bin, tiny_config.vocab_size, 256, 602)
+    initial = QMiniMoE(tiny_config)
+    with torch.no_grad():
+        next(initial.parameters()).zero_()
+    packed_path = export_packed_state(
+        initial.state_dict(), tiny_config, tmp_path / "initial-v2.qmini.npz"
+    )
+
+    run_dir = tmp_path / "packed-sft"
+    train_model(
+        tiny_config,
+        train_bin,
+        valid_bin,
+        run_dir,
+        steps=1,
+        batch_size=1,
+        seq_len=8,
+        grad_accum=1,
+        eval_every=1,
+        save_every=1,
+        eval_batches=1,
+        init_from=packed_path,
+    )
+    run_manifest = json.loads(
+        (run_dir / "run.json").read_text(encoding="utf-8")
+    )
+    assert run_manifest["initial_model"]["sha256"]
+    assert run_manifest["initial_model"]["path"] == str(packed_path.resolve())
+
+    checkpoint = torch.load(
+        run_dir / "latest.pt", map_location="cpu", weights_only=True
+    )
+    assert checkpoint["resume_contract"]["initial_model"]["sha256"] == (
+        run_manifest["initial_model"]["sha256"]
+    )
