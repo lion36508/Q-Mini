@@ -269,6 +269,17 @@ def iter_text_records(paths: Iterable[str | Path]) -> Iterator[str]:
             yield text
 
 
+def _encode_dataset_text(text: str) -> bytes:
+    """Encode dataset text without silently replacing invalid Unicode surrogates."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            "Dataset text contains an invalid Unicode surrogate; repair the source "
+            "record instead of silently changing its content."
+        ) from exc
+
+
 def _validate_near_duplicate_distance(distance: int) -> None:
     if isinstance(distance, bool) or not isinstance(distance, int) or not 0 <= distance <= 3:
         raise ValueError("near_duplicate_distance must be an integer from 0 to 3.")
@@ -290,7 +301,7 @@ def _simhash64(text: str) -> bytes:
     votes = [0] * 64
     for shingle in set(shingles):
         digest = hashlib.blake2b(
-            shingle.encode("utf-8", errors="replace"), digest_size=8
+            _encode_dataset_text(shingle), digest_size=8
         ).digest()
         value = int.from_bytes(digest, "big")
         for bit in range(64):
@@ -358,7 +369,7 @@ def _register_document(
     near_duplicate_distance: int,
 ) -> tuple[bytes, bool]:
     digest = hashlib.sha256(
-        normalized_text.encode("utf-8", errors="replace")
+        _encode_dataset_text(normalized_text)
     ).digest()
     signature = _simhash64(normalized_text) if near_duplicate_distance else None
     cursor = connection.execute(
@@ -522,7 +533,7 @@ def iter_training_text_records(
                 if len(normalized) < 2:
                     continue
                 digest = hashlib.sha256(
-                    normalized.encode("utf-8", errors="replace")
+                    _encode_dataset_text(normalized)
                 ).digest()
                 if connection.execute(
                     "SELECT 1 FROM documents WHERE digest=?", (digest,)
@@ -834,7 +845,7 @@ def prepare_token_streams(
                 if len(normalized) < 2:
                     continue
                 digest = hashlib.sha256(
-                    normalized.encode("utf-8", errors="replace")
+                    _encode_dataset_text(normalized)
                 ).digest()
                 if connection.execute(
                     "SELECT 1 FROM documents WHERE digest=?", (digest,)
