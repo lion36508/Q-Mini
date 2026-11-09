@@ -32,7 +32,7 @@ def peak_process_rss_bytes() -> int | None:
 
 def cpu_model_name() -> str:
     name = platform.processor().strip()
-    if name:
+    if name and not name.isdigit():
         return name
     cpuinfo = Path("/proc/cpuinfo")
     if cpuinfo.is_file():
