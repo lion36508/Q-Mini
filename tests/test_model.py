@@ -317,3 +317,100 @@ def test_single_expert_model_parameter_count_matches_dense_layout():
     assert config.estimated_parameter_count() == actual
     assert config.estimated_unique_active_parameter_count() == actual
     assert not any(".moe.router." in name or ".moe.router_norm." in name for name, _ in model.named_parameters())
+
+
+@pytest.mark.parametrize("sequence_length", [1, 2, 7, 512, 2048])
+def test_ssm_parallel_scan_matches_float64_sequential_oracle(sequence_length):
+    torch.manual_seed(20261109 + sequence_length)
+    decay = (
+        torch.rand(2, sequence_length, 5, dtype=torch.float32) * 0.999
+        + 0.0005
+    ).requires_grad_()
+    drive = torch.randn(2, sequence_length, 5, dtype=torch.float32).requires_grad_()
+    injection = (1.0 - decay) * drive
+
+    actual = GatedStateSpaceMixer.parallel_scan(decay, injection)
+    state = torch.zeros(2, 5, dtype=torch.float64)
+    expected = []
+    for position in range(sequence_length):
+        state = (
+            decay[:, position].double() * state
+            + injection[:, position].double()
+        )
+        expected.append(state)
+    reference = torch.stack(expected, dim=1)
+
+    assert actual.dtype == torch.float32
+    assert torch.isfinite(actual).all()
+    assert torch.allclose(
+        actual.double(), reference, atol=8e-5, rtol=8e-5
+    )
+    actual.square().mean().backward()
+    assert decay.grad is not None and torch.isfinite(decay.grad).all()
+    assert drive.grad is not None and torch.isfinite(drive.grad).all()
+
+
+def test_ssm_scan_extreme_decay_and_large_or_zero_injection_remain_finite():
+    decay_values = torch.tensor([1e-6, 1e-4, 0.5, 0.999, 1.0], dtype=torch.float32)
+    decay = decay_values.view(1, 1, -1).expand(2, 1024, -1).clone()
+    drive = torch.tensor(
+        [0.0, 1e6, -1e6, 1e-6, 0.0], dtype=torch.float32
+    ).view(1, 1, -1).expand_as(decay)
+    injection = (1.0 - decay) * drive
+    output = GatedStateSpaceMixer.parallel_scan(decay, injection)
+    assert torch.isfinite(output).all()
+    assert output.abs().max() <= 1e6
+
+
+def test_ssm_cpu_bfloat16_autocast_uses_finite_fp32_recurrent_state():
+    torch.manual_seed(771)
+    mixer = GatedStateSpaceMixer(dim=8, max_context=2048).eval()
+    inputs = torch.randn(2, 512, 8, dtype=torch.float32, requires_grad=True)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = mixer(inputs)
+        loss = output.float().square().mean()
+    assert torch.isfinite(output).all()
+    loss.backward()
+    assert inputs.grad is not None and torch.isfinite(inputs.grad).all()
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in mixer.parameters()
+    )
+
+    with torch.inference_mode(), torch.autocast(
+        device_type="cpu", dtype=torch.bfloat16
+    ):
+        full = mixer(inputs.detach())
+        state = None
+        streamed = []
+        for position in range(inputs.shape[1]):
+            item, state = mixer.forward_step(inputs.detach()[:, position], state)
+            streamed.append(item)
+    incremental = torch.stack(streamed, dim=1)
+    assert state is not None and state.dtype == torch.float32
+    assert torch.isfinite(incremental).all()
+    assert torch.allclose(
+        incremental.float(), full.float(), atol=1.5e-2, rtol=1.5e-2
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA numerical stress requires GPU CI")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_ssm_cuda_mixed_precision_long_scan_has_finite_outputs_and_gradients(dtype):
+    if dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA device does not support BF16 autocast.")
+    torch.manual_seed(772)
+    mixer = GatedStateSpaceMixer(dim=16, max_context=2048).cuda().train()
+    inputs = torch.randn(1, 2048, 16, device="cuda", requires_grad=True)
+
+    with torch.autocast(device_type="cuda", dtype=dtype):
+        output = mixer(inputs)
+        loss = output.float().square().mean()
+    assert torch.isfinite(output).all()
+    loss.backward()
+    assert inputs.grad is not None and torch.isfinite(inputs.grad).all()
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in mixer.parameters()
+    )
