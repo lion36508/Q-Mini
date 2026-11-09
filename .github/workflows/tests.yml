@@ -75,40 +75,62 @@ jobs:
               assert "qmini/native_kernel.cpp" in archive.namelist()
           print("Wheel includes qmini/native_kernel.cpp")
           PY
-      - name: Capture reproducible CPU reference benchmark
+          python -m venv --system-site-packages /tmp/qmini-wheel-venv
+          /tmp/qmini-wheel-venv/bin/pip install --no-deps /tmp/qmini-wheel/qmini-*.whl
+          (cd /tmp && /tmp/qmini-wheel-venv/bin/python -m qmini.native --build)
+      - name: Capture reproducible CPU native and fallback benchmarks
         run: |
           python scripts/benchmark.py \
             --config configs/qmini_smoke.json \
             --batch-size 1 --seq-len 32 --iterations 25 --warmup 5 \
-            --thinking-steps 1 --mode both \
-            --output /tmp/qmini-cpu-reference-benchmark.json
+            --thinking-steps 1 --seed 42 --mode both \
+            --output /tmp/qmini-cpu-native-benchmark.json
+          QMINI_NATIVE_LIBRARY=/tmp/qmini-no-native.so \
+            python scripts/benchmark.py \
+              --config configs/qmini_smoke.json \
+              --batch-size 1 --seq-len 32 --iterations 25 --warmup 5 \
+              --thinking-steps 1 --seed 42 --mode both \
+              --output /tmp/qmini-cpu-pytorch-fallback-benchmark.json
           python - <<'PY'
           import json
           from pathlib import Path
 
-          path = Path("/tmp/qmini-cpu-reference-benchmark.json")
-          report = json.loads(path.read_text(encoding="utf-8"))
           required = (
-              "python", "pytorch", "platform", "cpu_model",
-              "parameters", "prefill_input_tokens_per_second",
-              "decode_tokens_per_second", "peak_process_rss_bytes",
+              "python", "pytorch", "platform", "cpu_model", "parameters",
+              "prefill_input_tokens_per_second", "decode_tokens_per_second",
+              "peak_process_rss_bytes", "seed", "runtime_model",
           )
-          missing = [key for key in required if key not in report]
-          if missing:
-              raise SystemExit(f"Benchmark report missing fields: {missing}")
-          if report["runtime_model"] != "random-initialized-config":
-              raise SystemExit("Reference benchmark must identify random weights.")
-          if report["prefill_input_tokens_per_second"] <= 0:
-              raise SystemExit("Prefill throughput is invalid.")
-          if report["decode_tokens_per_second"] <= 0:
-              raise SystemExit("Decode throughput is invalid.")
-          print(json.dumps(report, indent=2))
+          for filename, expected_backend in (
+              ("qmini-cpu-native-benchmark.json", "native-int8-quaternary-scalar"),
+              ("qmini-cpu-pytorch-fallback-benchmark.json", "pytorch-fallback"),
+          ):
+              path = Path("/tmp") / filename
+              report = json.loads(path.read_text(encoding="utf-8"))
+              missing = [key for key in required if key not in report]
+              if missing:
+                  raise SystemExit(f"{filename} missing fields: {missing}")
+              if report["runtime_model"] != "random-initialized-config":
+                  raise SystemExit("Reference benchmark must identify random weights.")
+              if report["cpu_projection_backend"] != expected_backend:
+                  raise SystemExit(
+                      f"{filename} used {report['cpu_projection_backend']}, "
+                      f"expected {expected_backend}"
+                  )
+              if report["seed"] != 42:
+                  raise SystemExit(f"{filename} did not use the fixed benchmark seed.")
+              if report["prefill_input_tokens_per_second"] <= 0:
+                  raise SystemExit("Prefill throughput is invalid.")
+              if report["decode_tokens_per_second"] <= 0:
+                  raise SystemExit("Decode throughput is invalid.")
+              print(json.dumps(report, indent=2))
           PY
-      - name: Upload reproducible CPU reference benchmark
+      - name: Upload reproducible CPU reference benchmarks
         uses: actions/upload-artifact@v4
         with:
-          name: qmini-cpu-reference-benchmark
-          path: /tmp/qmini-cpu-reference-benchmark.json
+          name: qmini-cpu-reference-benchmarks
+          path: |
+            /tmp/qmini-cpu-native-benchmark.json
+            /tmp/qmini-cpu-pytorch-fallback-benchmark.json
           if-no-files-found: error
       - name: Run audit and CLI checks
         run: |
