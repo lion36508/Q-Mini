@@ -58,6 +58,41 @@ def _finish_metrics(total: dict[str, float]) -> dict[str, float]:
     }
 
 
+def _weight_component(name: str) -> str:
+    key = name.lower()
+    if "embedding" in key or "token_embed" in key:
+        return "embedding"
+    if "router" in key:
+        return "router"
+    if "expert" in key or ".experts." in key:
+        return "expert"
+    if any(part in key for part in ("depthwise", ".conv.", "convolution")):
+        return "convolution"
+    if any(part in key for part in ("state_space", ".ssm.", "state_mixer")):
+        return "state_space"
+    if "lm_head" in key or "output_projection" in key:
+        return "output_projection"
+    return "other"
+
+
+def _scale_summary(scales: np.ndarray) -> dict[str, float | int]:
+    values = np.asarray(scales, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        return {
+            "count": 0, "zero_count": 0, "min": 0.0, "median": 0.0,
+            "p95": 0.0, "max": 0.0, "mean": 0.0,
+        }
+    return {
+        "count": int(values.size),
+        "zero_count": int(np.count_nonzero(values == 0.0)),
+        "min": float(np.min(values)),
+        "median": float(np.median(values)),
+        "p95": float(np.percentile(values, 95)),
+        "max": float(np.max(values)),
+        "mean": float(np.mean(values)),
+    }
+
+
 def run_ablation(
     model_dir: Path,
     output_path: Path,
@@ -120,6 +155,24 @@ def run_ablation(
     totals = {name: _metric_accumulator() for name in formats}
     byte_counts = {name: 0 for name in formats}
     per_tensor: dict[str, Any] = {}
+    payload_breakdown = {
+        name: {
+            "matrix_symbol_or_fp16_bytes": 0,
+            "scale_bytes": 0,
+            "vector_bytes": 0,
+        }
+        for name in formats
+    }
+    components = (
+        "embedding", "output_projection", "router", "expert",
+        "convolution", "state_space", "other",
+    )
+    component_totals = {
+        component: {name: _metric_accumulator() for name in formats}
+        for component in components
+    }
+    component_counts = {component: 0 for component in components}
+    q2_scale_reports: dict[str, dict[str, float | int]] = {}
     quality_states: dict[str, dict[str, torch.Tensor]] | None = (
         {name: {} for name in formats} if eval_tokens is not None else None
     )
@@ -142,15 +195,22 @@ def run_ablation(
             for format_name in ("int8", "q2", "ternary", "int4"):
                 _add_metrics(totals[format_name], reference, approximation)
             vector_bytes = reference.numel() * 2
+            component = _weight_component(name)
+            component_counts[component] += 1
             for format_name in formats:
                 byte_counts[format_name] += vector_bytes
+                payload_breakdown[format_name]["vector_bytes"] += vector_bytes
+                _add_metrics(component_totals[component][format_name], reference, approximation)
                 if quality_states is not None:
                     quality_states[format_name][name] = approximation.reshape(value.shape).float()
             continue
 
         matrix_count += 1
+        component = _weight_component(name)
+        component_counts[component] += 1
         flat = reference.reshape(reference.shape[0], -1)
         row_report: dict[str, Any] = {
+            "component": component,
             "shape": list(reference.shape),
             "flattened_matrix_shape": list(flat.shape),
             "kind": "quantized-matrix",
@@ -160,6 +220,8 @@ def run_ablation(
         fp16 = flat.half().float()
         _add_metrics(totals["fp16"], flat, fp16)
         byte_counts["fp16"] += flat.numel() * 2
+        payload_breakdown["fp16"]["matrix_symbol_or_fp16_bytes"] += flat.numel() * 2
+        _add_metrics(component_totals[component]["fp16"], flat, fp16)
         row_report["formats"]["fp16"] = {
             **quantization_error_metrics(flat, fp16),
             "bytes": flat.numel() * 2,
@@ -170,6 +232,9 @@ def run_ablation(
         int8_bytes = int(int8_values.numel() + int8_scales.numel() * 4)
         _add_metrics(totals["int8"], flat, int8)
         byte_counts["int8"] += int8_bytes
+        payload_breakdown["int8"]["matrix_symbol_or_fp16_bytes"] += int8_values.numel()
+        payload_breakdown["int8"]["scale_bytes"] += int8_scales.numel() * 4
+        _add_metrics(component_totals[component]["int8"], flat, int8)
         row_report["formats"]["int8"] = {
             **quantization_error_metrics(flat, int8),
             "bytes": int8_bytes,
@@ -182,9 +247,16 @@ def run_ablation(
         q2_bytes = int(q2_packed.nbytes + q2_scales.nbytes)
         _add_metrics(totals["q2"], flat, q2)
         byte_counts["q2"] += q2_bytes
+        payload_breakdown["q2"]["matrix_symbol_or_fp16_bytes"] += q2_packed.nbytes
+        payload_breakdown["q2"]["scale_bytes"] += q2_scales.nbytes
+        _add_metrics(component_totals[component]["q2"], flat, q2)
+        q2_scale_reports[name] = _scale_summary(q2_scales)
         row_report["formats"]["q2"] = {
             **quantization_error_metrics(flat, q2),
             "bytes": q2_bytes,
+            "packed_symbol_bytes": int(q2_packed.nbytes),
+            "row_scale_bytes": int(q2_scales.nbytes),
+            "row_scale_summary": q2_scale_reports[name],
         }
 
         ternary_packed, ternary_scales = pack_ternary(flat)
@@ -194,6 +266,9 @@ def run_ablation(
         ternary_bytes = int(ternary_packed.nbytes + ternary_scales.nbytes)
         _add_metrics(totals["ternary"], flat, ternary)
         byte_counts["ternary"] += ternary_bytes
+        payload_breakdown["ternary"]["matrix_symbol_or_fp16_bytes"] += ternary_packed.nbytes
+        payload_breakdown["ternary"]["scale_bytes"] += ternary_scales.nbytes
+        _add_metrics(component_totals[component]["ternary"], flat, ternary)
         row_report["formats"]["ternary"] = {
             **quantization_error_metrics(flat, ternary),
             "bytes": ternary_bytes,
@@ -208,6 +283,9 @@ def run_ablation(
         int4_bytes = int(int4_packed.nbytes + int4_scales.nbytes)
         _add_metrics(totals["int4"], flat, int4)
         byte_counts["int4"] += int4_bytes
+        payload_breakdown["int4"]["matrix_symbol_or_fp16_bytes"] += int4_packed.nbytes
+        payload_breakdown["int4"]["scale_bytes"] += int4_scales.nbytes
+        _add_metrics(component_totals[component]["int4"], flat, int4)
         row_report["formats"]["int4"] = {
             **quantization_error_metrics(flat, int4),
             "bytes": int4_bytes,
@@ -286,8 +364,34 @@ def run_ablation(
         finally:
             model_module.quantize_quaternary = original_q2_fake_quantizer
 
+    category_metrics = {
+        component: {
+            "tensor_count": component_counts[component],
+            "formats": {
+                format_name: _finish_metrics(component_totals[component][format_name])
+                for format_name in formats
+            },
+        }
+        for component in components
+    }
+    for format_name in formats:
+        payload_breakdown[format_name]["total_weight_payload_bytes"] = byte_counts[format_name]
+
+    packed_archive_candidates = []
+    if source_path.is_dir():
+        packed_archive_candidates.extend([
+            source_path / "model.qmini.npz",
+            source_path / "final_model" / "model.qmini.npz",
+        ])
+    elif source_path.is_file():
+        packed_archive_candidates.append(source_path.parent / "model.qmini.npz")
+    packed_archive = next(
+        (candidate for candidate in packed_archive_candidates if candidate.is_file()),
+        None,
+    )
+
     report = {
-        "format": "qmini-weight-quantization-ablation-v2",
+        "format": "qmini-weight-quantization-ablation-v3",
         "source_model_dir": str(source_path.resolve()),
         "source_weight_path": str(weight_path.resolve()),
         "source_kind": source_kind,
@@ -295,6 +399,16 @@ def run_ablation(
         "source_parameter_count": config.estimated_parameter_count(),
         "matrix_tensor_count": matrix_count,
         "vector_tensor_count": vector_count,
+        "component_metrics": category_metrics,
+        "q2_row_scale_reports": q2_scale_reports,
+        "payload_breakdown": payload_breakdown,
+        "packed_archive": (
+            {
+                "path": str(packed_archive.resolve()),
+                "file_bytes": int(packed_archive.stat().st_size),
+            }
+            if packed_archive is not None else None
+        ),
         "group_size": group_size,
         "heldout_language_evaluation": heldout_evaluation,
         "evaluation_dataset_sha256": (
