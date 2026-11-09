@@ -167,8 +167,11 @@ def load_packed_model(
                 "row_scale": "2 * mean(abs(original_output_row))",
                 "all_zero_row_scale": 0.0,
             }
-            if metadata.get("q2_contract") != expected_contract:
-                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
+            if (
+                metadata.get("q2_contract") != expected_contract
+                or metadata.get("quaternary_codes") != expected_contract["codebook"]
+            ):
+                raise ValueError("Q2-v2 archive contract/codebook metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         if expected_config is not None and config.to_dict() != expected_config.to_dict():
             raise ValueError("Packed model config does not match config.json.")
@@ -280,8 +283,11 @@ def load_packed_state_into_trainable_model(
                 "row_scale": "2 * mean(abs(original_output_row))",
                 "all_zero_row_scale": 0.0,
             }
-            if metadata.get("q2_contract") != expected_contract:
-                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
+            if (
+                metadata.get("q2_contract") != expected_contract
+                or metadata.get("quaternary_codes") != expected_contract["codebook"]
+            ):
+                raise ValueError("Q2-v2 archive contract/codebook metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         if config.to_dict() != model.config.to_dict():
             raise ValueError("Packed initialization config differs from the trainable model.")
