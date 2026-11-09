@@ -273,3 +273,47 @@ def test_forward_step_rejects_grad_enabled_streaming(tiny_config):
         item is None or not item.requires_grad
         for item in [*state.caches, *state.state_spaces]
     )
+
+
+def test_single_expert_is_a_dense_ffn_without_degenerate_router():
+    config = QMiniConfig(
+        vocab_size=64, d_model=16, d_hidden=24, n_layers=1,
+        n_experts=1, top_k=1, max_context=16, kernel_size=3,
+        dilations=(1,), max_thinking_steps=1, thinking_steps=1,
+    )
+    from qmini.model import SparseTop1MoE
+
+    moe = SparseTop1MoE(config)
+    assert moe.router is None
+    assert moe.router_norm is None
+    assert not any(
+        name.startswith(("router.", "router_norm."))
+        for name, _ in moe.named_parameters()
+    )
+
+    values = torch.randn(2, 5, config.d_model)
+    actual, auxiliary, counts = moe(values)
+    expected = moe.experts[0](values.reshape(-1, config.d_model)).reshape_as(values)
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
+    assert auxiliary.item() == 0.0
+    assert torch.equal(counts, torch.tensor([10]))
+
+    (actual.square().mean() + auxiliary).backward()
+    gradients = [parameter.grad for parameter in moe.parameters()]
+    assert gradients
+    assert all(gradient is not None for gradient in gradients)
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_single_expert_model_parameter_count_matches_dense_layout():
+    config = QMiniConfig(
+        vocab_size=64, d_model=16, d_hidden=24, n_layers=2,
+        n_experts=1, top_k=1, max_context=16, kernel_size=3,
+        dilations=(1, 2), max_thinking_steps=1, thinking_steps=1,
+        use_state_space=True,
+    )
+    model = QMiniMoE(config)
+    actual = sum(parameter.numel() for parameter in model.parameters())
+    assert config.estimated_parameter_count() == actual
+    assert config.estimated_unique_active_parameter_count() == actual
+    assert not any(".moe.router." in name or ".moe.router_norm." in name for name, _ in model.named_parameters())
