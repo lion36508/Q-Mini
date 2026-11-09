@@ -32,25 +32,28 @@ class NativeKernel:
         self.path = Path(library_path).resolve()
         self.library = ctypes.CDLL(str(self.path))
         try:
-            self.function = self.library.qmini_linear_i8
+            self.function = self.library.qmini_linear_i8_v2
             self.neon_function = self.library.qmini_kernel_has_neon
         except AttributeError as exc:
             raise RuntimeError(
-                "Native library is outdated. Rebuild it with: python -m qmini.native --build"
+                "Native library is outdated (Q2-v2 ABI required). Rebuild it with: python -m qmini.native --build"
             ) from exc
         i8 = np.ctypeslib.ndpointer(dtype=np.int8, flags="C_CONTIGUOUS")
         u8 = np.ctypeslib.ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS")
         f32 = np.ctypeslib.ndpointer(dtype=np.float32, flags="C_CONTIGUOUS")
         self.function.argtypes = [
             i8, u8, f32, f32, f32, f32,
-            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ]
         self.function.restype = ctypes.c_int
         self.neon_function.argtypes = []
         self.neon_function.restype = ctypes.c_int
         self.uses_neon = bool(self.neon_function())
 
-    def linear(self, activations_i8, packed_weights, weight_scales, activation_scales, bias=None):
+    def linear(
+        self, activations_i8, packed_weights, weight_scales, activation_scales,
+        bias=None, q2_version: int = 2,
+    ):
         raw_x = np.asarray(activations_i8)
         raw_packed = np.asarray(packed_weights)
         if raw_x.dtype != np.int8:
@@ -70,8 +73,15 @@ class NativeKernel:
             raise ValueError("Packed weight shape does not exactly match activation dimensions.")
         if xs.shape != (x.shape[0],):
             raise ValueError("activation_scales must contain one scale per input row.")
-        if not np.isfinite(ws).all() or np.any(ws <= 0):
-            raise ValueError("weight_scales must be finite and positive.")
+        if q2_version not in (1, 2):
+            raise ValueError("q2_version must be 1 or 2.")
+        if not np.isfinite(ws).all() or (
+            np.any(ws <= 0) if q2_version == 1 else np.any(ws < 0)
+        ):
+            raise ValueError(
+                "weight_scales must be finite and positive for Q2-v1, "
+                "or finite and non-negative for Q2-v2."
+            )
         if not np.isfinite(xs).all() or np.any(xs <= 0):
             raise ValueError("activation_scales must be finite and positive.")
         if bias is None:
@@ -84,7 +94,8 @@ class NativeKernel:
                 raise ValueError("bias values must be finite.")
         output = np.empty((x.shape[0], ws.size), dtype=np.float32)
         status = self.function(
-            x, packed, ws, xs, b, output, x.shape[0], x.shape[1], ws.size
+            x, packed, ws, xs, b, output,
+            x.shape[0], x.shape[1], ws.size, int(q2_version)
         )
         if status:
             raise RuntimeError(f"Native kernel returned error {status}.")
