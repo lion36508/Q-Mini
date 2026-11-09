@@ -89,6 +89,7 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
 ):
     from qmini.model import QMiniMoE
     from qmini.config import QMiniConfig
+    from qmini.export import export_packed_state
     from qmini.quantization_ablation import run_ablation
 
     model_dir = tmp_path / "final_model"
@@ -97,6 +98,8 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
     config.save(model_dir / "config.json")
     model = QMiniMoE(config)
     torch.save(model.state_dict(), model_dir / "model.pt")
+    packed_archive = model_dir / "model.qmini.npz"
+    export_packed_state(model.state_dict(), config, packed_archive)
 
     tokens_path = tmp_path / "heldout.bin"
     rng = np.random.default_rng(603)
@@ -127,6 +130,8 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
         assert evaluation["seed"] == 991
     assert report["evaluation_dataset_sha256"] == hashlib.sha256(tokens_path.read_bytes()).hexdigest()
     assert report["format"] == "qmini-weight-quantization-ablation-v3"
+    assert report["packed_archive"]["file_bytes"] == packed_archive.stat().st_size
+    assert report["packed_archive"]["path"] == str(packed_archive.resolve())
     assert "q2_row_scale_reports" in report
     assert "component_metrics" in report
     assert "payload_breakdown" in report
