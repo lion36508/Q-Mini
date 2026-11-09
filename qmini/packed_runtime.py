@@ -101,10 +101,10 @@ def packed_linear_forward(
     if x.ndim < 1 or x.shape[-1] != int(module._qmini_in_features):
         raise ValueError("Input feature dimension does not match packed Q-Mini weight.")
 
-    from .native import get_native_kernel
+    from .native import get_native_kernel, native_kernel_should_be_used
 
     kernel = get_native_kernel()
-    if kernel is not None and x.dtype == torch.float32:
+    if native_kernel_should_be_used(kernel) and x.dtype == torch.float32:
         activations_i8, activation_scales = quantize_int8_per_token(x)
         bias_array = (
             bias.detach().float().contiguous().numpy()
