@@ -319,6 +319,127 @@ def _atomic_json_save(payload: dict[str, Any], path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _verify_initial_model_artifact(
+    path: str | Path,
+    config: QMiniConfig,
+    tokenizer_path: str | Path | None,
+) -> dict[str, Any]:
+    """Require a hash-verified Q-Mini final_model artifact for SFT initialization.
+
+    A matching tensor shape is not evidence of model ownership. The source must
+    be a Q-Mini final_model directory whose manifest, config, packed export and
+    selected dense/packed artifact agree. When a tokenizer is supplied, it must
+    be the exact tokenizer saved with that source checkpoint.
+    """
+    source_path = Path(path).expanduser().resolve()
+    source_dir = source_path.parent
+    manifest_path = source_dir / "model_manifest.json"
+    config_path = source_dir / "config.json"
+    if not manifest_path.is_file() or not config_path.is_file():
+        raise ValueError(
+            "SFT initialization requires a verified Q-Mini final_model directory "
+            "containing model_manifest.json and config.json."
+        )
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        source_config = QMiniConfig.from_json(config_path)
+        manifest_config = QMiniConfig.from_dict(manifest.get("config"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("Q-Mini source manifest/config is invalid.") from exc
+
+    if not isinstance(manifest, dict) or manifest.get("format") != "qmini-final-model-v2":
+        raise ValueError("Unsupported Q-Mini final-model manifest format.")
+    if source_config.to_dict() != manifest_config.to_dict():
+        raise ValueError("Q-Mini source manifest config does not match config.json.")
+    if source_config.to_dict() != config.to_dict():
+        raise ValueError(
+            "Q-Mini SFT source architecture does not match the requested model config."
+        )
+    expected_parameters = source_config.estimated_parameter_count()
+    if manifest.get("parameters") != expected_parameters:
+        raise ValueError("Q-Mini source manifest parameter count is inconsistent.")
+    if (
+        isinstance(manifest.get("step"), bool)
+        or not isinstance(manifest.get("step"), int)
+        or manifest["step"] < 1
+        or isinstance(manifest.get("tokens_seen"), bool)
+        or not isinstance(manifest.get("tokens_seen"), int)
+        or manifest["tokens_seen"] < 1
+    ):
+        raise ValueError("Q-Mini SFT source must record a completed training step and tokens_seen.")
+
+    packed_name = manifest.get("packed_export")
+    if (
+        not isinstance(packed_name, str)
+        or not packed_name
+        or Path(packed_name).name != packed_name
+    ):
+        raise ValueError("Q-Mini source manifest has an unsafe packed-export filename.")
+    packed_path = source_dir / packed_name
+    if not packed_path.is_file():
+        raise ValueError("Q-Mini source packed export is missing.")
+    packed_fingerprint = _sha256_file(packed_path)
+    if (
+        manifest.get("packed_export_sha256") != packed_fingerprint["sha256"]
+        or manifest.get("packed_export_bytes") != packed_fingerprint["size_bytes"]
+    ):
+        raise ValueError("Q-Mini source packed export SHA-256/size does not match its manifest.")
+
+    from .export import verify_packed_export
+
+    packed_report = verify_packed_export(packed_path)
+    if packed_report.get("parameter_count") != expected_parameters:
+        raise ValueError("Q-Mini packed export parameter count does not match its config.")
+
+    if source_path.suffix.lower() == ".pt":
+        expected_path = (source_dir / "model.pt").resolve()
+        if source_path != expected_path or manifest.get("dense_training_snapshot_included") is not True:
+            raise ValueError(
+                "Dense SFT initialization must use the manifest-listed final_model/model.pt."
+            )
+        dense_fingerprint = _sha256_file(source_path)
+        if (
+            manifest.get("dense_snapshot_sha256") != dense_fingerprint["sha256"]
+            or manifest.get("dense_snapshot_bytes") != dense_fingerprint["size_bytes"]
+        ):
+            raise ValueError("Q-Mini dense snapshot SHA-256/size does not match its manifest.")
+    elif source_path.suffix.lower() == ".npz":
+        if source_path != packed_path.resolve():
+            raise ValueError(
+                "Packed SFT initialization must use the manifest-listed Q-Mini packed export."
+            )
+    else:
+        raise ValueError(
+            "SFT --init-from accepts only a verified final_model/model.pt or "
+            "final_model/model.qmini.npz artifact."
+        )
+
+    if tokenizer_path is not None:
+        target_tokenizer = Path(tokenizer_path).expanduser().resolve()
+        source_tokenizer = source_dir / "tokenizer.json"
+        tokenizer_hash = manifest.get("tokenizer_sha256")
+        if (
+            not source_tokenizer.is_file()
+            or not isinstance(tokenizer_hash, str)
+            or not tokenizer_hash
+        ):
+            raise ValueError(
+                "Q-Mini SFT source has no verified tokenizer; pretrain with --tokenizer first."
+            )
+        source_tokenizer_hash = _sha256_file(source_tokenizer)["sha256"]
+        target_tokenizer_hash = _sha256_file(target_tokenizer)["sha256"]
+        if (
+            source_tokenizer_hash != tokenizer_hash
+            or target_tokenizer_hash != tokenizer_hash
+        ):
+            raise ValueError(
+                "SFT tokenizer must exactly match the tokenizer saved with the Q-Mini source checkpoint."
+            )
+
+    return manifest
+
+
 def _verify_prepared_dataset_manifest(
     train_path: str | Path,
     valid_path: str | Path,
@@ -570,6 +691,8 @@ def train_model(
                 raise ValueError(f"Could not recover the fine-tuning source from {previous_run_path}.")
     if initial_model_path is not None and not initial_model_path.is_file():
         raise FileNotFoundError(f"Initial model weights not found: {initial_model_path}")
+    if initial_model_path is not None:
+        _verify_initial_model_artifact(initial_model_path, config, tokenizer_path)
     train_tokens = _load_tokens(train_bin, "Training")
     valid_tokens = _load_tokens(valid_bin, "Validation")
     _verify_prepared_dataset_manifest(

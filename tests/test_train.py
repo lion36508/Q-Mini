@@ -538,19 +538,19 @@ def test_supervised_window_index_samples_uniformly_from_valid_start_positions():
 def test_finetuning_initializes_from_new_q2_v2_packed_artifact(
     tmp_path, tiny_config
 ):
-    from qmini.export import export_packed_state
-    from qmini.model import QMiniMoE
-
     train_bin = tmp_path / "packed-train.bin"
     valid_bin = tmp_path / "packed-valid.bin"
     _write_stream(train_bin, tiny_config.vocab_size, 256, 601)
     _write_stream(valid_bin, tiny_config.vocab_size, 256, 602)
-    initial = QMiniMoE(tiny_config)
-    with torch.no_grad():
-        next(initial.parameters()).zero_()
-    packed_path = export_packed_state(
-        initial.state_dict(), tiny_config, tmp_path / "initial-v2.qmini.npz"
+
+    # The packed SFT source must be a real Q-Mini-owned final_model artifact,
+    # with its manifest and dense/packed fingerprints created by pretraining.
+    pretrained_dir = train_model(
+        tiny_config, train_bin, valid_bin, tmp_path / "packed-pretrain",
+        steps=1, batch_size=1, seq_len=8, grad_accum=1,
+        eval_every=1, save_every=1, eval_batches=1,
     )
+    packed_path = pretrained_dir / "model.qmini.npz"
 
     run_dir = tmp_path / "packed-sft"
     train_model(
@@ -579,3 +579,70 @@ def test_finetuning_initializes_from_new_q2_v2_packed_artifact(
     assert checkpoint["resume_contract"]["initial_model"]["sha256"] == (
         run_manifest["initial_model"]["sha256"]
     )
+
+
+def test_finetuning_rejects_unverified_external_or_orphan_weights(tmp_path, tiny_config):
+    from qmini.export import export_packed_state
+    from qmini.model import QMiniMoE
+
+    train_bin = tmp_path / "orphan-train.bin"
+    valid_bin = tmp_path / "orphan-valid.bin"
+    _write_stream(train_bin, tiny_config.vocab_size, 256, 701)
+    _write_stream(valid_bin, tiny_config.vocab_size, 256, 702)
+
+    orphan_pt = tmp_path / "orphan.pt"
+    torch.save(QMiniMoE(tiny_config).state_dict(), orphan_pt)
+    orphan_npz = export_packed_state(
+        QMiniMoE(tiny_config).state_dict(),
+        tiny_config,
+        tmp_path / "orphan.qmini.npz",
+    )
+    for artifact in (orphan_pt, orphan_npz):
+        with pytest.raises(ValueError, match="verified Q-Mini final_model"):
+            train_model(
+                tiny_config,
+                train_bin,
+                valid_bin,
+                tmp_path / f"sft-{artifact.suffix[1:]}",
+                steps=1,
+                batch_size=1,
+                seq_len=8,
+                grad_accum=1,
+                eval_every=1,
+                save_every=1,
+                eval_batches=1,
+                init_from=artifact,
+            )
+
+
+def test_finetuning_rejects_tampered_source_export_manifest_hash(
+    tmp_path, tiny_config
+):
+    train_bin = tmp_path / "tamper-train.bin"
+    valid_bin = tmp_path / "tamper-valid.bin"
+    _write_stream(train_bin, tiny_config.vocab_size, 256, 801)
+    _write_stream(valid_bin, tiny_config.vocab_size, 256, 802)
+    pretrained_dir = train_model(
+        tiny_config, train_bin, valid_bin, tmp_path / "tamper-pretrain",
+        steps=1, batch_size=1, seq_len=8, grad_accum=1,
+        eval_every=1, save_every=1, eval_batches=1,
+    )
+    packed_path = pretrained_dir / "model.qmini.npz"
+    with packed_path.open("ab") as handle:
+        handle.write(b"tampered")
+
+    with pytest.raises(ValueError, match="packed export SHA-256/size"):
+        train_model(
+            tiny_config,
+            train_bin,
+            valid_bin,
+            tmp_path / "tamper-sft",
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            eval_every=1,
+            save_every=1,
+            eval_batches=1,
+            init_from=packed_path,
+        )
