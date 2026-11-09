@@ -106,3 +106,32 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
         assert np.isfinite(metrics["cosine_similarity"])
         assert metrics["estimated_weight_payload_bytes"] > 0
     assert any("does not measure validation NLL" in item for item in report["limitations"])
+
+
+def test_quantization_ablation_accepts_qmini_owned_latest_checkpoint(
+    tiny_config, tmp_path
+):
+    from qmini.model import QMiniMoE
+    from qmini.config import QMiniConfig
+    from scripts.quantization_ablation import run_ablation
+
+    config = QMiniConfig.from_dict(tiny_config.to_dict())
+    model = QMiniMoE(config)
+    run_dir = tmp_path / "own-pretraining-run"
+    run_dir.mkdir()
+    checkpoint_path = run_dir / "latest.pt"
+    torch.save({
+        "format": "qmini-checkpoint-v2",
+        "model": model.state_dict(),
+        "config": config.to_dict(),
+        "step": 1,
+    }, checkpoint_path)
+
+    report = run_ablation(
+        run_dir,
+        tmp_path / "checkpoint-ablation.json",
+        group_size=8,
+    )
+    assert report["source_kind"] == "qmini-training-checkpoint"
+    assert report["source_weight_path"] == str(checkpoint_path.resolve())
+    assert report["source_parameter_count"] == model.parameter_report()["total"]
