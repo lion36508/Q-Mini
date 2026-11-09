@@ -23,6 +23,8 @@ class QMiniConfig:
     rms_norm_eps: float = 1e-5
     dropout: float = 0.0
     router_aux_loss_coef: float = 0.01
+    use_state_space: bool = False
+    gradient_checkpointing: bool = False
     seed: int = 42
 
     def validate(self) -> None:
@@ -55,6 +57,10 @@ class QMiniConfig:
             raise TypeError("seed must be an integer.")
         if self.seed < 0:
             raise ValueError("seed must be non-negative.")
+        if not isinstance(self.use_state_space, bool):
+            raise TypeError("use_state_space must be a boolean.")
+        if not isinstance(self.gradient_checkpointing, bool):
+            raise TypeError("gradient_checkpointing must be a boolean.")
 
         if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k != 1:
             raise ValueError("Q-Mini currently implements sparse Top-1 routing only.")
@@ -122,6 +128,41 @@ class QMiniConfig:
             json.dump(self.to_dict(), handle, indent=2)
             handle.write("\n")
         return target
+
+    def _block_parameter_counts(self) -> tuple[int, int]:
+        """Return (full block parameters, one expert's parameters)."""
+        d, h, experts = self.d_model, self.d_hidden, self.n_experts
+        shared = 3 * d * d + 7 * d + d * self.kernel_size + d * experts + experts
+        if self.use_state_space:
+            # Four QLinear projections plus the state-space RMSNorm.
+            shared += 4 * d * d + 5 * d
+        one_expert = 2 * d * h + h + d
+        return shared + experts * one_expert, one_expert
+
+    def estimated_parameter_count(self) -> int:
+        """Exact model-layout count without allocating model tensors."""
+        self.validate()
+        block_total, _ = self._block_parameter_counts()
+        return self.vocab_size * self.d_model + (self.n_layers + 1) * block_total + self.d_model
+
+    def estimated_unique_active_parameter_count(self) -> int:
+        """Unique parameters touched per token under the current Top-1 routing policy."""
+        self.validate()
+        block_total, one_expert = self._block_parameter_counts()
+        shared = block_total - self.n_experts * one_expert
+        return (
+            self.vocab_size * self.d_model
+            + self.d_model
+            + (self.n_layers + 1) * (shared + one_expert)
+        )
+
+    def estimated_adamw_training_state_bytes(self) -> int:
+        """FP32 parameters, gradients and two FP32 Adam moments; excludes activations."""
+        return self.estimated_parameter_count() * 16
+
+    def reference_tokens_at_20_per_parameter(self) -> int:
+        """Dense-LM planning heuristic only; not a guarantee or sparse-MoE scaling law."""
+        return self.estimated_parameter_count() * 20
 
     def main_receptive_field(self) -> int:
         return 1 + (self.kernel_size - 1) * sum(self.dilations)
