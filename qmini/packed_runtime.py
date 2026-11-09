@@ -269,8 +269,19 @@ def load_packed_state_into_trainable_model(
     archive_path = Path(path)
     with np.load(archive_path, allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata_json"].item()))
-        if metadata.get("format") != "qmini-packed-v1":
+        archive_format = metadata.get("format")
+        if archive_format not in {"qmini-packed-v1", "qmini-packed-v2"}:
             raise ValueError("Unsupported Q-Mini packed export format.")
+        q2_version = 1 if archive_format == "qmini-packed-v1" else 2
+        if q2_version == 2:
+            expected_contract = {
+                "version": 2,
+                "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+                "row_scale": "2 * mean(abs(original_output_row))",
+                "all_zero_row_scale": 0.0,
+            }
+            if metadata.get("q2_contract") != expected_contract:
+                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         if config.to_dict() != model.config.to_dict():
             raise ValueError("Packed initialization config differs from the trainable model.")
@@ -292,8 +303,13 @@ def load_packed_state_into_trainable_model(
                 if spec["kind"] == "q2":
                     packed = np.asarray(archive[spec["packed_key"]], dtype=np.uint8)
                     scales = np.asarray(archive[spec["scale_key"]], dtype=np.float32)
+                    if not np.isfinite(scales).all() or (
+                        np.any(scales <= 0) if q2_version == 1 else np.any(scales < 0)
+                    ):
+                        raise ValueError(f"Invalid Q2 row scales in packed initialization tensor: {name}.")
                     value = unpack_quaternary(
-                        packed, scales, math.prod(shape[1:])
+                        packed, scales, math.prod(shape[1:]),
+                        format_version=q2_version,
                     ).reshape(shape)
                 elif spec["kind"] == "fp16":
                     value = np.asarray(archive[spec["value_key"]], dtype=np.float32)
