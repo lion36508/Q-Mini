@@ -195,3 +195,6 @@ The 5B trainer is not yet distributed-ready: FP32 parameters, gradients and Adam
 The hybrid diagonal SSM is an adaptive, input-dependent decay recurrent path with a parallel training scan and constant-size streaming state. Streaming can continue beyond max_context without replaying the prompt; max_context bounds batch/prompt prefill, not total recurrent stream duration. This compressed state is not lossless transcript memory. Model weights do not update autonomously during chat: persistent SQLite notes are external retrieval context, and actual weight learning requires an explicit fine-tuning run.
 
 The SSM scan, causality, packed runtime, stream cache bounds, data split integrity and training smoke paths are unit-tested. Capability improvement must still be demonstrated using a trained checkpoint and held-out conversation, reasoning, coding and multilingual evaluations. The 5B weight file size is not a proxy for assistant quality.
+
+
+The single-expert dense profile bypasses router and router normalization because a one-element softmax is identically 1 and its parameters have no useful gradient. Periodic validation loss is accumulated by total supervised target-token count, with that denominator recorded in training metrics.
