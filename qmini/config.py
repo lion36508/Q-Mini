@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -25,22 +26,64 @@ class QMiniConfig:
     seed: int = 42
 
     def validate(self) -> None:
-        positive = {
-            "vocab_size": self.vocab_size, "d_model": self.d_model,
-            "d_hidden": self.d_hidden, "n_layers": self.n_layers,
-            "n_experts": self.n_experts, "max_context": self.max_context,
-            "kernel_size": self.kernel_size, "max_thinking_steps": self.max_thinking_steps,
+        integer_fields = {
+            "vocab_size": self.vocab_size,
+            "d_model": self.d_model,
+            "d_hidden": self.d_hidden,
+            "n_layers": self.n_layers,
+            "n_experts": self.n_experts,
+            "max_context": self.max_context,
+            "kernel_size": self.kernel_size,
+            "max_thinking_steps": self.max_thinking_steps,
             "thinking_steps": self.thinking_steps,
         }
-        bad = [key for key, value in positive.items() if value <= 0]
-        if bad:
-            raise ValueError("Must be positive: " + ", ".join(bad))
-        if self.top_k != 1:
+        invalid_types = [
+            name for name, value in integer_fields.items()
+            if isinstance(value, bool) or not isinstance(value, int)
+        ]
+        if invalid_types:
+            raise TypeError("These Q-Mini settings must be integers: " + ", ".join(invalid_types))
+
+        non_positive = [
+            name for name, value in integer_fields.items() if value <= 0
+        ]
+        if non_positive:
+            raise ValueError("Must be positive: " + ", ".join(non_positive))
+        if self.max_context < 2:
+            raise ValueError("max_context must be at least 2 tokens.")
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise TypeError("seed must be an integer.")
+        if self.seed < 0:
+            raise ValueError("seed must be non-negative.")
+
+        if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k != 1:
             raise ValueError("Q-Mini currently implements sparse Top-1 routing only.")
-        if len(self.dilations) != self.n_layers or any(int(d) <= 0 for d in self.dilations):
-            raise ValueError("dilations must contain one positive value per main block.")
+        if not isinstance(self.dilations, (tuple, list)):
+            raise TypeError("dilations must be a tuple or list of integers.")
+        if (
+            len(self.dilations) != self.n_layers
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in self.dilations
+            )
+        ):
+            raise ValueError("dilations must contain one positive integer per main block.")
         if self.thinking_steps > self.max_thinking_steps:
             raise ValueError("thinking_steps cannot exceed max_thinking_steps.")
+
+        numeric_fields = {
+            "dropout": self.dropout,
+            "rms_norm_eps": self.rms_norm_eps,
+            "router_aux_loss_coef": self.router_aux_loss_coef,
+        }
+        for name, value in numeric_fields.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"{name} must be a finite number.")
+
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1).")
         if self.rms_norm_eps <= 0 or self.router_aux_loss_coef < 0:
@@ -56,7 +99,7 @@ class QMiniConfig:
             raise ValueError("Unknown Q-Mini config keys: " + ", ".join(unknown))
         clean = dict(values)
         if "dilations" in clean:
-            clean["dilations"] = tuple(int(x) for x in clean["dilations"])
+            clean["dilations"] = tuple(clean["dilations"]) if isinstance(clean["dilations"], (list, tuple)) else clean["dilations"]
         config = cls(**clean)
         config.validate()
         return config
