@@ -189,3 +189,19 @@ def test_gradient_checkpointed_state_space_path_backpropagates(tiny_config):
     grad = model.blocks[0].state_mixer.state_input.weight.grad
     assert grad is not None and torch.isfinite(grad).all()
     assert grad.abs().sum() > 0
+
+def test_state_space_channels_start_with_logarithmic_timescales(tiny_config):
+    from torch.nn.functional import softplus
+    from qmini.model import GatedStateSpaceMixer
+
+    mixer = GatedStateSpaceMixer(
+        tiny_config.d_model, max_context=tiny_config.max_context
+    )
+    with torch.no_grad():
+        rates = softplus(mixer.state_decay.bias)
+        time_constants = rates.reciprocal()
+    assert torch.all(time_constants[1:] > time_constants[:-1])
+    assert torch.isclose(time_constants[0], torch.tensor(2.0), rtol=1e-4)
+    assert torch.isclose(
+        time_constants[-1], torch.tensor(float(tiny_config.max_context)), rtol=1e-4
+    )
