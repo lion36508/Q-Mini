@@ -78,6 +78,28 @@ def main() -> int:
         return 0
     preflight.set_defaults(func=do_preflight)
 
+    initial_build = commands.add_parser(
+        "build-initial",
+        help="build an untrained Q2-v2 initial brain without dense full-model allocation",
+    )
+    initial_build.add_argument("--config", required=True)
+    initial_build.add_argument("--output-dir", required=True)
+    initial_build.add_argument(
+        "--source-revision",
+        default=None,
+        help="optional Git commit SHA recorded in the initial artifact manifest",
+    )
+    def do_build_initial(args):
+        from .initial_build import build_initial_brain
+        report = build_initial_brain(
+            QMiniConfig.from_json(args.config),
+            args.output_dir,
+            source_revision=args.source_revision,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    initial_build.set_defaults(func=do_build_initial)
+
     plan = commands.add_parser("plan", help="estimate model size and resource requirements without allocating the model")
     plan.add_argument("--config", required=True)
     plan.add_argument("--world-size", type=int, default=1,
@@ -199,6 +221,13 @@ def main() -> int:
         ),
     )
     train.add_argument(
+        "--init-from-initial",
+        help=(
+            "start QAT pretraining from a verified step-zero Q2-v2 initial brain; "
+            "this is distinct from SFT --init-from"
+        ),
+    )
+    train.add_argument(
         "--train-mask-bin",
         help="aligned uint8 target mask; required for prepared auto/assistant datasets",
     )
@@ -216,7 +245,7 @@ def main() -> int:
             a.steps, a.batch_size, a.seq_len, a.grad_accum, a.lr, a.weight_decay,
             a.eval_every, a.save_every, a.eval_batches, a.resume, a.tokenizer, None,
             a.extend_schedule, a.allow_legacy_resume, a.train_mask_bin, a.valid_mask_bin,
-            init_from=a.init_from); return 0
+            init_from=a.init_from, init_from_initial=a.init_from_initial); return 0
     train.set_defaults(func=do_train)
     gen = commands.add_parser("generate", help="generate from a trained model")
     gen.add_argument("--model-dir", required=True); gen.add_argument("--prompt", required=True)

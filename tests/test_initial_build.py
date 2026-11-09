@@ -61,3 +61,47 @@ def test_initial_build_refuses_to_overwrite_existing_directory(tiny_config, tmp_
     with pytest.raises(FileExistsError):
         build_initial_brain(tiny_config, target_dir)
     assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_pretraining_can_start_from_step_zero_q2_initial_brain(tiny_config, tmp_path):
+    import numpy as np
+    from qmini.train import train_model
+
+    initial_dir = tmp_path / "initial-brain"
+    build_initial_brain(tiny_config, initial_dir, source_revision="test-source")
+    train_tokens = np.random.default_rng(10).integers(
+        0, tiny_config.vocab_size, size=128, dtype=np.uint16
+    )
+    valid_tokens = np.random.default_rng(11).integers(
+        0, tiny_config.vocab_size, size=128, dtype=np.uint16
+    )
+    train_path = tmp_path / "train.bin"
+    valid_path = tmp_path / "valid.bin"
+    train_tokens.tofile(train_path)
+    valid_tokens.tofile(valid_path)
+
+    run_dir = tmp_path / "q2-pretraining-run"
+    train_model(
+        tiny_config,
+        train_path,
+        valid_path,
+        run_dir,
+        steps=1,
+        batch_size=1,
+        seq_len=8,
+        grad_accum=1,
+        eval_every=1,
+        save_every=1,
+        eval_batches=1,
+        init_from_initial=initial_dir / "model.qmini.npz",
+    )
+
+    with (run_dir / "run.json").open(encoding="utf-8") as handle:
+        run_manifest = json.load(handle)
+    assert run_manifest["initial_model"]["kind"] == "q2-step-zero-initial"
+    assert run_manifest["initial_model"]["path"] == str(
+        (initial_dir / "model.qmini.npz").resolve()
+    )
+    checkpoint = torch.load(run_dir / "latest.pt", map_location="cpu", weights_only=False)
+    assert checkpoint["step"] == 1
+    assert checkpoint["resume_contract"]["initial_model"]["sha256"]

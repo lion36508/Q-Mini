@@ -442,6 +442,76 @@ def _verify_initial_model_artifact(
     return manifest
 
 
+
+def _verify_initial_brain_artifact(
+    path: str | Path,
+    config: QMiniConfig,
+) -> dict[str, Any]:
+    """Verify a step-zero Q2-v2 initialization artifact for pretraining."""
+    source_path = Path(path).expanduser().resolve()
+    if source_path.suffix.lower() != ".npz":
+        raise ValueError("--init-from-initial accepts only model.qmini.npz.")
+    source_dir = source_path.parent
+    manifest_path = source_dir / "model_manifest.json"
+    config_path = source_dir / "config.json"
+    if not manifest_path.is_file() or not config_path.is_file():
+        raise ValueError(
+            "Initial-brain initialization requires model_manifest.json and config.json."
+        )
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        source_config = QMiniConfig.from_json(config_path)
+        manifest_config = QMiniConfig.from_dict(manifest.get("config"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("Q-Mini initial-brain manifest/config is invalid.") from exc
+
+    if manifest.get("format") != "qmini-initial-brain-v1":
+        raise ValueError("Unsupported Q-Mini initial-brain manifest format.")
+    if manifest.get("status") != "untrained_initialization":
+        raise ValueError("Initial-brain source is not marked as an untrained initialization.")
+    if source_config.to_dict() != manifest_config.to_dict():
+        raise ValueError("Initial-brain manifest config does not match config.json.")
+    if source_config.to_dict() != config.to_dict():
+        raise ValueError("Initial-brain architecture does not match the requested training config.")
+    expected_parameters = source_config.estimated_parameter_count()
+    if manifest.get("parameters") != expected_parameters:
+        raise ValueError("Initial-brain parameter count does not match config.")
+    for field in ("training_steps", "optimizer_steps", "tokens_seen"):
+        value = manifest.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+            raise ValueError(f"Initial-brain manifest must record {field}=0.")
+    if manifest.get("matrix_weight_format") != "qmini-packed-v2" or manifest.get("matrix_weight_bits") != 2:
+        raise ValueError("Initial-brain source is not the required Q2-v2 two-bit format.")
+
+    packed_name = manifest.get("packed_export")
+    if (
+        not isinstance(packed_name, str)
+        or not packed_name
+        or Path(packed_name).name != packed_name
+    ):
+        raise ValueError("Initial-brain manifest has an unsafe packed-export filename.")
+    packed_path = source_dir / packed_name
+    if packed_path.resolve() != source_path or not packed_path.is_file():
+        raise ValueError("Initial-brain path is not the manifest-listed packed artifact.")
+    fingerprint = _sha256_file(packed_path)
+    if (
+        manifest.get("packed_export_sha256") != fingerprint["sha256"]
+        or manifest.get("packed_export_bytes") != fingerprint["size_bytes"]
+    ):
+        raise ValueError("Initial-brain packed artifact SHA-256/size does not match its manifest.")
+
+    from .export import verify_packed_export
+    report = verify_packed_export(packed_path)
+    if (
+        report.get("format") != "qmini-packed-v2"
+        or report.get("q2_version") != 2
+        or report.get("parameter_count") != expected_parameters
+    ):
+        raise ValueError("Initial-brain packed artifact failed Q2-v2 verification.")
+    return manifest
+
+
 def _verify_prepared_dataset_manifest(
     train_path: str | Path,
     valid_path: str | Path,
@@ -651,8 +721,9 @@ def train_model(
     train_mask_bin: str | Path | None = None,
     valid_mask_bin: str | Path | None = None,
     init_from: str | Path | None = None,
+    init_from_initial: str | Path | None = None,
 ) -> Path:
-    """Train from scratch or resume only when data and optimization settings match."""
+    """Pretrain from scratch/step-zero Q2 brain, SFT from a trained model, or resume."""
     config.validate()
     positive = {
         "steps": steps,
@@ -707,10 +778,16 @@ def train_model(
         raise ValueError("Provide both --train-mask-bin and --valid-mask-bin, or neither.")
     if tokenizer_path is not None and not Path(tokenizer_path).is_file():
         raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
-    if resume and init_from is not None:
-        raise ValueError("--resume and --init-from are mutually exclusive.")
+    if resume and (init_from is not None or init_from_initial is not None):
+        raise ValueError("--resume cannot be combined with --init-from or --init-from-initial.")
+    if init_from is not None and init_from_initial is not None:
+        raise ValueError("Choose either --init-from (trained SFT source) or --init-from-initial (step-zero Q2 brain), not both.")
     initial_model_path = Path(init_from).expanduser().resolve() if init_from is not None else None
-    if resume and initial_model_path is None:
+    initial_brain_path = (
+        Path(init_from_initial).expanduser().resolve()
+        if init_from_initial is not None else None
+    )
+    if resume and initial_model_path is None and initial_brain_path is None:
         previous_run_path = Path(output_dir).expanduser() / "run.json"
         if previous_run_path.is_file():
             try:
@@ -718,13 +795,20 @@ def train_model(
                     previous_run = json.load(handle)
                 previous_initial = previous_run.get("initial_model")
                 if previous_initial and previous_initial.get("path"):
-                    initial_model_path = Path(previous_initial["path"]).expanduser().resolve()
+                    restored_path = Path(previous_initial["path"]).expanduser().resolve()
+                    if previous_initial.get("kind") == "q2-step-zero-initial":
+                        initial_brain_path = restored_path
+                    else:
+                        initial_model_path = restored_path
             except (OSError, json.JSONDecodeError, AttributeError, TypeError):
-                raise ValueError(f"Could not recover the fine-tuning source from {previous_run_path}.")
-    if initial_model_path is not None and not initial_model_path.is_file():
-        raise FileNotFoundError(f"Initial model weights not found: {initial_model_path}")
+                raise ValueError(f"Could not recover the initialization source from {previous_run_path}.")
+    initial_source_path = initial_brain_path or initial_model_path
+    if initial_source_path is not None and not initial_source_path.is_file():
+        raise FileNotFoundError(f"Initial model weights not found: {initial_source_path}")
     if initial_model_path is not None:
         _verify_initial_model_artifact(initial_model_path, config, tokenizer_path)
+    if initial_brain_path is not None:
+        _verify_initial_brain_artifact(initial_brain_path, config)
     train_tokens = _load_tokens(train_bin, "Training")
     valid_tokens = _load_tokens(valid_bin, "Validation")
     _verify_prepared_dataset_manifest(
@@ -755,7 +839,7 @@ def train_model(
     contract = _resume_contract(
         train_bin, valid_bin, tokenizer_path, train_mask_bin, valid_mask_bin,
         batch_size, seq_len, grad_accum, learning_rate, weight_decay, actual_seed,
-        initial_model_path,
+        initial_source_path,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -788,14 +872,14 @@ def train_model(
         betas=(0.9, 0.95),
         weight_decay=weight_decay,
     )
-    if initial_model_path is not None and not resume:
-        if initial_model_path.suffix.lower() == ".npz":
+    if initial_source_path is not None and not resume:
+        if initial_brain_path is not None or initial_source_path.suffix.lower() == ".npz":
             from .packed_runtime import load_packed_state_into_trainable_model
-            load_packed_state_into_trainable_model(model, initial_model_path)
+            load_packed_state_into_trainable_model(model, initial_source_path)
         else:
             # Never fall back to unrestricted pickle loading for model files.
             initial_state = torch.load(
-                initial_model_path, map_location=device, weights_only=True
+                initial_source_path, map_location=device, weights_only=True
             )
             if not isinstance(initial_state, dict) or "format" in initial_state or "model" in initial_state:
                 raise ValueError(
@@ -803,9 +887,10 @@ def train_model(
                     "final_model/model.qmini.npz, not a training checkpoint."
                 )
             model.load_state_dict(initial_state, strict=True)
+        stage = "QAT pretraining from step-zero Q2-v2 initialization" if initial_brain_path is not None else "fine-tuning from a trained Q-Mini checkpoint"
         print(
-            f"Initialized model weights from {initial_model_path}; "
-            "the fine-tuning stage starts with a fresh optimizer."
+            f"Initialized model weights from {initial_source_path}; "
+            f"{stage} starts with a fresh optimizer."
         )
     use_amp = device.type == "cuda"
     bf16_supported = (
@@ -908,12 +993,17 @@ def train_model(
         )
 
     initial_model_record = None
-    if initial_model_path is not None:
-        fingerprint = _sha256_file(initial_model_path)
+    if initial_source_path is not None:
+        fingerprint = _sha256_file(initial_source_path)
         initial_model_record = {
-            "path": str(initial_model_path),
+            "path": str(initial_source_path),
             "sha256": fingerprint["sha256"],
             "size_bytes": fingerprint["size_bytes"],
+            "kind": (
+                "q2-step-zero-initial"
+                if initial_brain_path is not None
+                else "trained-qmini-checkpoint"
+            ),
         }
 
     run_manifest = {
