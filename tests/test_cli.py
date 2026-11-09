@@ -193,3 +193,44 @@ def test_training_cli_requires_an_explicit_total_step_target(monkeypatch):
     with pytest.raises(SystemExit) as error:
         cli.main()
     assert error.value.code == 2
+
+
+
+def test_audit_is_config_only_and_does_not_materialize_large_model(monkeypatch, capsys):
+    import sys
+    import qmini.cli as cli
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("audit must not allocate model tensors")
+
+    monkeypatch.setattr(cli, "QMiniMoE", forbidden)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["qmini", "audit", "--config", "configs/qmini_5b.json"],
+    )
+    assert cli.main() == 0
+    output = capsys.readouterr().out
+    assert "5,132,630,288" in output
+    assert "Tensor allocation: skipped" in output
+
+
+def test_preflight_cli_reports_no_dataset_or_optimizer_update(monkeypatch, capsys):
+    import json
+    import sys
+    from qmini import cli
+
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "qmini", "preflight",
+            "--config", "configs/qmini_smoke.json",
+            "--device", "cpu",
+            "--sequence-length", "8",
+        ],
+    )
+    assert cli.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["dataset_opened"] is False
+    assert report["optimizer_step_performed"] is False
+    assert report["weights_updated"] is False
+    assert report["logits_shape"] == [1, 8, 128]

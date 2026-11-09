@@ -759,6 +759,8 @@ def train_model(
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from .preflight import check_training_memory_budget
+    memory_preflight = check_training_memory_budget(config, device)
     run_dir = Path(output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = run_dir / "latest.pt"
@@ -927,6 +929,7 @@ def train_model(
         },
         "precision": "bf16" if use_bf16 else "fp16" if use_fp16 else "fp32",
         "device": str(device),
+        "memory_preflight": memory_preflight,
     }
     _atomic_json_save(run_manifest, run_manifest_path)
     if resume:

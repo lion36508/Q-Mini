@@ -100,3 +100,30 @@ The CLI requires an explicit total optimizer-step target via --steps; it has no 
 ## Assistant SFT source and evaluation gates
 
 The Colab SFT stage does not silently fine-tune the tiny smoke checkpoint. By default it selects the largest completed base_*/final_model artifact with a valid Q-Mini final-model manifest, matching tokenizer and verified packed-export hash, and at least 50 million parameters. A smaller experiment requires an explicit SFT_SOURCE_OVERRIDE. SFT is refused unless independent held-out task and multi-turn conversation sets both exist and neither is byte-identical to an SFT training file. Both held-out hashes are included in the SFT run identity; both baselines run before SFT and both post-SFT evaluations run afterward. This prevents an unmeasured SFT run, but does not itself guarantee improved dialogue quality.
+
+
+## Empty-brain architecture preflight
+
+Before attaching a corpus or starting an optimizer run, the model graph can be
+checked using only synthetic token IDs and fresh random Q-Mini weights:
+
+```bash
+python -m qmini.cli audit --config configs/qmini_research_152m.json
+python -m qmini.cli preflight \
+  --config configs/qmini_research_152m.json \
+  --device auto --sequence-length 8
+```
+
+`audit` is a config-only operation and never materializes model tensors, so it
+is safe to use for the 5B configuration. `preflight` is a bounded dry-run: it
+checks the model's actual parameter count, forward/logit shapes, finite outputs
+and (by default) finite non-zero gradients. It refuses profiles above 250M
+parameters unless the limit is explicitly raised. It does not open a dataset,
+load pretrained weights, call an optimizer, perform an optimizer step or alter
+the random-initialized weights.
+
+The trainer independently checks measured free device/host memory before model
+allocation. The default guard requires at least 2x the FP32
+parameters+gradients+AdamW-state lower bound. This is a guardrail, not a full
+activation/workspace forecast; the Colab 152M path retains its stricter 8 GiB
+free-memory launch floor and first-step OOM monitoring.

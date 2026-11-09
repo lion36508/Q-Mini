@@ -24,24 +24,59 @@ def main() -> int:
     audit = commands.add_parser("audit", help="inspect model configuration and runtime")
     audit.add_argument("--config", default="configs/qmini_base.json")
     def do_audit(args):
-        from .model import QMiniMoE
-        cfg = QMiniConfig.from_json(args.config); model = QMiniMoE(cfg)
-        print("Q-MINI AUDIT"); print("=" * 60)
+        cfg = QMiniConfig.from_json(args.config)
+        parameters = cfg.estimated_parameter_count()
+        print("Q-MINI CONFIG AUDIT"); print("=" * 60)
         print("Python:", platform.python_version(), "PyTorch:", torch.__version__)
         print("Platform:", platform.platform(), "CUDA:", torch.cuda.is_available())
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
-                p = torch.cuda.get_device_properties(i); print(f"GPU {i}: {p.name} ({p.total_memory/1024**3:.1f} GiB)")
-        print("Parameters:", f"{model.parameter_report()['total']:,}")
-        print("Main receptive field:", cfg.main_receptive_field(), "tokens; max context:", cfg.max_context)
+                p = torch.cuda.get_device_properties(i)
+                print(f"GPU {i}: {p.name} ({p.total_memory/1024**3:.1f} GiB)")
+        print("Estimated parameters:", f"{parameters:,}")
+        print("FP32 params + gradients + AdamW state lower bound:",
+              f"{cfg.estimated_adamw_training_state_bytes():,} bytes")
+        print("Architecture: causal depthwise convolution + gated diagonal SSM:",
+              "enabled" if cfg.use_state_space else "disabled")
+        print("Sparse routing:", f"Top-{cfg.top_k} across {cfg.n_experts} experts")
+        print("Main receptive field:", cfg.main_receptive_field(),
+              "tokens; max context:", cfg.max_context)
+        print("Shared refinement passes:", cfg.thinking_steps,
+              "/", cfg.max_thinking_steps)
         print("C++ compiler:", shutil.which("clang++") or shutil.which("g++") or "not found")
         from .native import native_kernel_status
         native = native_kernel_status()
         print("CPU projection backend:", native["backend"])
         print("ARM NEON:", native["uses_neon"])
         print("Native library:", native["path"])
-        print("Attention/QKV: absent by design"); return 0
+        print("Attention/QKV: absent by design")
+        print("Tensor allocation: skipped (safe config-only audit)")
+        return 0
     audit.set_defaults(func=do_audit)
+
+    preflight = commands.add_parser(
+        "preflight",
+        help="dry-run the random-initialized model graph without loading data or updating weights",
+    )
+    preflight.add_argument("--config", required=True)
+    preflight.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    preflight.add_argument("--sequence-length", type=int, default=8)
+    preflight.add_argument("--max-parameters", type=int, default=250_000_000,
+                           help="refuse to materialize larger configs unless explicitly raised")
+    preflight.add_argument("--no-backward", action="store_true",
+                           help="check forward shapes only; by default finite gradients are also checked")
+    def do_preflight(args):
+        from .preflight import run_architecture_preflight
+        report = run_architecture_preflight(
+            QMiniConfig.from_json(args.config),
+            device=args.device,
+            sequence_length=args.sequence_length,
+            max_parameters=args.max_parameters,
+            check_backward=not args.no_backward,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    preflight.set_defaults(func=do_preflight)
 
     plan = commands.add_parser("plan", help="estimate model size and resource requirements without allocating the model")
     plan.add_argument("--config", required=True)
