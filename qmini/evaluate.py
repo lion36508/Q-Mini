@@ -56,7 +56,73 @@ def token_f1(prediction: str, reference: str) -> float:
     return 0.0 if precision + recall == 0 else 2.0 * precision * recall / (precision + recall)
 
 
-def _task_records(path: str | Path) -> Iterator[dict[str, str]]:
+_NUMBER_PATTERN = re.compile(
+    r"(?<![\w.])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?"
+)
+
+
+def _wilson_interval(successes: int, total: int, z: float = 1.959963984540054) -> list[float]:
+    if total <= 0:
+        return [0.0, 0.0]
+    proportion = successes / total
+    denominator = 1.0 + z * z / total
+    centre = (proportion + z * z / (2.0 * total)) / denominator
+    radius = (
+        z * math.sqrt(
+            proportion * (1.0 - proportion) / total
+            + z * z / (4.0 * total * total)
+        ) / denominator
+    )
+    return [max(0.0, centre - radius), min(1.0, centre + radius)]
+
+
+def _parse_single_number(text: str) -> float:
+    matches = _NUMBER_PATTERN.findall(text.replace(",", ""))
+    if len(matches) != 1:
+        raise ValueError("Expected exactly one numeric value.")
+    value = float(matches[0])
+    if not math.isfinite(value):
+        raise ValueError("Numeric answer must be finite.")
+    return value
+
+
+def _score_task(
+    prediction: str,
+    reference: str,
+    scorer: str,
+    tolerance: float,
+) -> tuple[bool, str | None]:
+    """Task-specific scorers. Lexical F1 remains diagnostic, not semantic."""
+    if scorer == "numeric":
+        try:
+            predicted_value = _parse_single_number(prediction)
+            expected_value = _parse_single_number(reference)
+        except ValueError as exc:
+            return False, str(exc)
+        return (
+            math.isclose(
+                predicted_value, expected_value,
+                rel_tol=0.0, abs_tol=tolerance,
+            ),
+            None,
+        )
+    if scorer == "json":
+        try:
+            predicted_json = json.loads(prediction)
+            expected_json = json.loads(reference)
+        except json.JSONDecodeError as exc:
+            return False, f"Invalid JSON: {exc.msg}"
+        return predicted_json == expected_json, None
+    if scorer == "contains":
+        required = normalize_answer(reference)
+        observed = normalize_answer(prediction)
+        return bool(required) and required in observed, None
+    if scorer == "lexical":
+        return normalize_answer(prediction) == normalize_answer(reference), None
+    raise ValueError(f"Unsupported task scorer: {scorer!r}")
+
+
+def _task_records(path: str | Path) -> Iterator[dict[str, Any]]:
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(f"Task evaluation JSONL not found: {source}")
@@ -75,16 +141,38 @@ def _task_records(path: str | Path) -> Iterator[dict[str, str]]:
             prompt = record.get("prompt")
             reference = record.get("reference", record.get("expected", record.get("answer")))
             category = record.get("category", record.get("task", "uncategorized"))
+            language = record.get("language", "unspecified")
+            scorer = record.get("scorer", "lexical")
+            tolerance = record.get("tolerance", 0.0)
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError(f"Task record at {source}:{line_number} needs a non-empty prompt.")
             if not isinstance(reference, str) or not reference.strip():
                 raise ValueError(
                     f"Task record at {source}:{line_number} needs reference/expected/answer text."
                 )
+            if not isinstance(language, str) or not language.strip():
+                raise ValueError(f"Task record at {source}:{line_number} has invalid language.")
+            if scorer not in {"lexical", "numeric", "json", "contains"}:
+                raise ValueError(
+                    f"Task record at {source}:{line_number} uses unsupported scorer {scorer!r}."
+                )
+            try:
+                tolerance = float(tolerance)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Task record at {source}:{line_number} has invalid numeric tolerance."
+                ) from exc
+            if not math.isfinite(tolerance) or tolerance < 0:
+                raise ValueError(
+                    f"Task record at {source}:{line_number} tolerance must be finite and non-negative."
+                )
             yield {
                 "prompt": prompt,
                 "reference": reference,
                 "category": str(category).strip() or "uncategorized",
+                "language": language.strip().lower(),
+                "scorer": str(scorer),
+                "tolerance": tolerance,
             }
 
 
@@ -197,7 +285,7 @@ def evaluate_task_file(
     limit: int | None = None,
     thinking_steps: int | None = None,
 ) -> dict[str, Any]:
-    """Evaluate a user-supplied JSONL prompt/reference set with greedy decoding."""
+    """Evaluate a versioned task file with lexical and task-specific scoring."""
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be positive.")
     if limit is not None and limit < 1:
@@ -207,9 +295,16 @@ def evaluate_task_file(
     model.eval()
     total = 0
     exact = 0
+    passed = 0
     f1_total = 0.0
-    category_stats: dict[str, dict[str, float]] = defaultdict(
-        lambda: {"count": 0.0, "exact_match": 0.0, "token_f1": 0.0}
+    category_stats: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "count": 0, "exact_match": 0, "passed": 0,
+            "token_f1": 0.0, "scorers": set(),
+        }
+    )
+    language_stats: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"count": 0, "passed": 0}
     )
     cases: list[dict[str, Any]] = []
     try:
@@ -224,21 +319,39 @@ def evaluate_task_file(
                 top_p=1.0,
                 thinking_steps=thinking_steps,
             )
-            exact_match = normalize_answer(prediction) == normalize_answer(task["reference"])
+            lexical_exact = (
+                normalize_answer(prediction) == normalize_answer(task["reference"])
+            )
             score = token_f1(prediction, task["reference"])
+            task_passed, scoring_error = _score_task(
+                prediction,
+                task["reference"],
+                task["scorer"],
+                task["tolerance"],
+            )
             total += 1
-            exact += int(exact_match)
+            exact += int(lexical_exact)
+            passed += int(task_passed)
             f1_total += score
             category = category_stats[task["category"]]
             category["count"] += 1
-            category["exact_match"] += int(exact_match)
+            category["exact_match"] += int(lexical_exact)
+            category["passed"] += int(task_passed)
             category["token_f1"] += score
+            category["scorers"].add(task["scorer"])
+            language = language_stats[task["language"]]
+            language["count"] += 1
+            language["passed"] += int(task_passed)
             cases.append({
                 "category": task["category"],
+                "language": task["language"],
+                "scorer": task["scorer"],
                 "prompt": task["prompt"],
                 "reference": task["reference"],
                 "prediction": prediction,
-                "exact_match": bool(exact_match),
+                "passed": bool(task_passed),
+                "scoring_error": scoring_error,
+                "exact_match": bool(lexical_exact),
                 "token_f1": float(score),
             })
     finally:
@@ -251,25 +364,43 @@ def evaluate_task_file(
         count = int(values["count"])
         categories[name] = {
             "examples": count,
+            "scorers": sorted(values["scorers"]),
+            "task_pass_rate": values["passed"] / count,
+            "task_pass_rate_wilson_95": _wilson_interval(
+                int(values["passed"]), count
+            ),
             "exact_match": values["exact_match"] / count,
             "mean_token_f1": values["token_f1"] / count,
         }
+    languages = {}
+    for name, values in sorted(language_stats.items()):
+        count = int(values["count"])
+        languages[name] = {
+            "examples": count,
+            "task_pass_rate": values["passed"] / count,
+            "task_pass_rate_wilson_95": _wilson_interval(
+                int(values["passed"]), count
+            ),
+        }
     return {
-        "format": "qmini-task-evaluation-v1",
+        "format": "qmini-task-evaluation-v2",
         "model_parameters": model.parameter_report()["total"],
         "dataset": str(Path(dataset_path)),
         "examples": total,
+        "task_pass_rate": passed / total,
+        "task_pass_rate_wilson_95": _wilson_interval(passed, total),
         "exact_match": exact / total,
         "mean_token_f1": f1_total / total,
         "categories": categories,
+        "languages": languages,
         "cases": cases,
         "scoring_note": (
-            "Exact match and lexical token F1 are diagnostic string metrics, not semantic "
-            "correctness, factuality or reasoning guarantees. Use independently checked "
-            "answers and task-specific executable tests for capability claims."
+            "Numeric and JSON scorers perform structured checks; contains and lexical "
+            "scorers are string-based diagnostics. None proves factuality, reasoning, "
+            "code safety or general assistant capability. Code tasks require a separate "
+            "constrained test harness and independently reviewed test cases."
         ),
     }
-
 
 def emit_report(report: dict[str, Any], output_path: str | Path | None = None) -> None:
     serialized = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
