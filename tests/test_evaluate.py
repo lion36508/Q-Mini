@@ -1,4 +1,5 @@
 import pytest
+import hashlib
 import json
 
 import numpy as np
@@ -102,6 +103,7 @@ def test_task_evaluation_uses_numeric_and_json_scorers_with_language_reports(
     )
     assert report["format"] == "qmini-task-evaluation-v2"
     assert report["examples"] == 3
+    assert report["dataset_sha256"] == hashlib.sha256(dataset.read_bytes()).hexdigest()
     assert report["task_pass_rate"] == pytest.approx(2 / 3)
     assert report["task_pass_rate_wilson_95"][0] < 2 / 3
     assert report["categories"]["math"]["task_pass_rate"] == 1.0
@@ -188,6 +190,7 @@ def test_multi_turn_conversation_evaluation_reuses_prior_assistant_turns(
 
     assert report["format"] == "qmini-conversation-evaluation-v1"
     assert report["conversations"] == 2
+    assert report["dataset_sha256"] == hashlib.sha256(dataset.read_bytes()).hexdigest()
     assert report["turns"] == 3
     assert report["task_pass_rate"] == 1.0
     assert set(report["languages"]) == {"en", "hi"}
