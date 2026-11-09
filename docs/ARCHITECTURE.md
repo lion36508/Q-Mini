@@ -29,9 +29,9 @@ Each convolution is padded only on the left by `dilation * (kernel_size - 1)`. N
 
 ## Quantization
 
-Trainable master weights remain FP32 and are fake-quantized row-wise to {-2,-1,+1,+2} with STE. Activations use per-token AbsMax scaling to signed INT8 [-127,127], also with STE. Packed export stores four 2-bit codes per byte and row scales. Optimizer state is not 2-bit.
+Trainable master weights remain FP32 and are fake-quantized row-wise to {-2,-1,+1,+2} with STE. Activations use per-token AbsMax scaling to signed INT8 [-127,127], also with STE. The deployment archive stores four 2-bit codes per byte, one FP32 row scale and FP16 one-dimensional vectors. Optimizer state is not 2-bit.
 
-During CPU evaluation/inference, QLinear projections and the tied output projection use the C++17 kernel when `libqmini_kernel.so` is available. Activations are quantized to INT8 per token; each output row's quaternary weights are packed to four 2-bit codes per byte; the native inner loop accumulates integer products before applying row/token scales and bias. Packed weights are cached until the underlying parameter version changes. Training and autograd always use the PyTorch STE reference path.
+The packed loader constructs the same module graph on the meta device, then installs packed buffers and small FP16 vectors. It does not materialize dense 5B FP32 matrices. CPU QLinear projections and the tied vocabulary projection use the C++17 INT8-by-Q2 kernel when `libqmini_kernel.so` is available. Without the kernel, the PyTorch fallback decodes one matrix at a time; the tied vocabulary projection decodes bounded row chunks. The depthwise convolution kernels are small and decoded lazily. The packed runtime is inference-only; training always uses FP32 master parameters and the PyTorch STE path.
 
 ## Sparse experts and refinement
 
@@ -41,7 +41,7 @@ The authoritative parameter count is computed from `sum(p.numel() for p in model
 
 ## Native runtime boundary
 
-The native kernel covers dense linear projections only. AArch64/NEON builds use vector widening multiply and pairwise integer accumulation for the INT8-by-quaternary dot product; other targets use the scalar integer fallback. Causal depthwise convolution, RMSNorm, token embedding lookup, sparse dispatch and state management remain PyTorch operations. This is intentionally a hybrid runtime; it must not be described as a full integer-only or fully native ARM64 model. CI cross-compiles the C++ primitive for AArch64, but only a real Android device benchmark can establish phone performance.
+The native kernel covers dense linear projections only. AArch64/NEON builds use vector widening multiply and pairwise integer accumulation for the INT8-by-quaternary dot product; other targets use the scalar integer fallback. Causal depthwise convolution, RMSNorm, token embedding lookup, sparse dispatch and state management remain PyTorch operations. This is a packed low-memory hybrid runtime, not a fully integer-only or fully native ARM64 graph. CI cross-compiles the C++ primitive for AArch64, but only a real Android device benchmark can establish phone speed, peak resident RAM, thermal stability and Android compatibility.
 
 
 ## Local memory boundary
@@ -63,3 +63,12 @@ For the full 8,192-token vocabulary, the instantiated shape contains 134,426,200
 `configs/qmini_5m.json` contains 5,245,996 parameters. `configs/qmini_5b.json` contains 5,132,630,288 parameters. Use `python -m qmini.cli plan --config configs/qmini_5b.json` to inspect it without allocating a 5B model.
 
 The 5B FP32 parameter, gradient and two AdamW moment arrays require about 82.1 GB before activations and runtime overhead. FSDP/ZeRO and expert/tensor parallel execution are not implemented, so the 5B config is not yet an executable H100 distributed-training setup.
+
+
+## 5B deployment footprint and CPU runtime
+
+For \`configs/qmini_5b.json\` (5,132,630,288 parameters), the row-padded Q2 weight payload, FP32 row scales, FP16 vectors and a metadata reserve are estimated at **1,294,691,936 bytes** (about 1.295 GB decimal / 1.206 GiB). This is below the 1,500,000,000-byte model-weight artifact budget. The estimate is based on exact tensor shapes, not a measured trained checkpoint; tokenizer and application files are separate.
+
+Large training runs keep the resumable \`latest.pt\` checkpoint in the run directory. The final deployment folder omits the redundant dense FP32 \`model.pt\` when it would exceed 256 MiB and retains \`model.qmini.npz\`, configuration and tokenizer. \`qmini generate\` and \`qmini chat\` prefer the packed CPU runtime automatically. A packed archive can be supplied to \`--init-from\` for a later training stage; it is dequantized one tensor at a time into the separately allocated trainable model.
+
+Run \`python -m qmini.cli plan --config configs/qmini_5b.json\` to inspect the estimated artifact size. Run \`python -m qmini.cli verify-export --path final_model/model.qmini.npz\` to validate an archive without expanding the complete FP32 state. CPU compatibility is implemented, but speed on any specific handset is not claimed until benchmarked on that device.
