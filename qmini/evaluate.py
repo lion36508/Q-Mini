@@ -418,3 +418,286 @@ def emit_report(report: dict[str, Any], output_path: str | Path | None = None) -
             temporary.unlink(missing_ok=True)
         print(f"Evaluation report saved: {target}")
     print(serialized)
+
+
+
+def _conversation_records(path: str | Path) -> Iterator[dict[str, Any]]:
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Conversation evaluation JSONL not found: {source}")
+    with source.open("r", encoding="utf-8-sig") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid conversation JSON in {source} at line {line_number}: {exc}"
+                ) from exc
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"Conversation record at {source}:{line_number} must be an object."
+                )
+            turns = record.get("turns")
+            if not isinstance(turns, list) or not turns:
+                raise ValueError(
+                    f"Conversation at {source}:{line_number} needs a non-empty turns array."
+                )
+            language = record.get("language", "unspecified")
+            category = record.get("category", "conversation")
+            system = record.get("system", "")
+            if not isinstance(language, str) or not language.strip():
+                raise ValueError(
+                    f"Conversation at {source}:{line_number} has invalid language."
+                )
+            if not isinstance(category, str) or not category.strip():
+                raise ValueError(
+                    f"Conversation at {source}:{line_number} has invalid category."
+                )
+            if not isinstance(system, str):
+                raise ValueError(
+                    f"Conversation at {source}:{line_number} system prompt must be text."
+                )
+            normalized_turns = []
+            for turn_index, turn in enumerate(turns, 1):
+                if not isinstance(turn, dict):
+                    raise ValueError(
+                        f"Conversation turn {turn_index} at {source}:{line_number} must be an object."
+                    )
+                user_text = turn.get("user")
+                reference = turn.get("reference", turn.get("expected", turn.get("answer")))
+                scorer = turn.get("scorer", "lexical")
+                tolerance = turn.get("tolerance", 0.0)
+                turn_language = turn.get("language", language)
+                turn_category = turn.get("category", category)
+                if not isinstance(user_text, str) or not user_text.strip():
+                    raise ValueError(
+                        f"Conversation turn {turn_index} at {source}:{line_number} needs user text."
+                    )
+                if not isinstance(reference, str) or not reference.strip():
+                    raise ValueError(
+                        f"Conversation turn {turn_index} at {source}:{line_number} needs reference text."
+                    )
+                if scorer not in {"lexical", "numeric", "json", "contains"}:
+                    raise ValueError(
+                        f"Unsupported scorer {scorer!r} in conversation turn {turn_index}."
+                    )
+                if not isinstance(turn_language, str) or not turn_language.strip():
+                    raise ValueError("Conversation turn language must be non-empty text.")
+                if not isinstance(turn_category, str) or not turn_category.strip():
+                    raise ValueError("Conversation turn category must be non-empty text.")
+                try:
+                    numeric_tolerance = float(tolerance)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Conversation turn tolerance must be numeric.") from exc
+                if not math.isfinite(numeric_tolerance) or numeric_tolerance < 0:
+                    raise ValueError("Conversation turn tolerance must be finite and non-negative.")
+                normalized_turns.append({
+                    "user": user_text,
+                    "reference": reference,
+                    "scorer": scorer,
+                    "tolerance": numeric_tolerance,
+                    "language": turn_language.strip().lower(),
+                    "category": turn_category.strip(),
+                })
+            yield {
+                "id": str(record.get("id", f"{source.name}:{line_number}")),
+                "language": language.strip().lower(),
+                "category": category.strip(),
+                "system": system,
+                "turns": normalized_turns,
+            }
+
+
+def evaluate_conversation_file(
+    model,
+    tokenizer,
+    dataset_path: str | Path,
+    max_new_tokens: int = 128,
+    limit: int | None = None,
+    thinking_steps: int | None = None,
+) -> dict[str, Any]:
+    """Evaluate multi-turn continuity using generated answers as later context."""
+    if max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be positive.")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be positive when supplied.")
+
+    required_tokens = ("<|system|>", "<|user|>", "<|assistant|>", "<|end|>")
+    has_control_tokens = all(
+        tokenizer.token_to_id(token) is not None for token in required_tokens
+    )
+    from .generate import trim_chat_history
+
+    was_training = model.training
+    model.eval()
+    conversations = 0
+    exact = 0
+    passed = 0
+    f1_total = 0.0
+    category_stats: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "count": 0, "exact_match": 0, "passed": 0,
+            "token_f1": 0.0, "scorers": set(),
+        }
+    )
+    language_stats: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"count": 0, "passed": 0}
+    )
+    cases: list[dict[str, Any]] = []
+    try:
+        with torch.inference_mode():
+            for conversation in _conversation_records(dataset_path):
+                if limit is not None and conversations >= limit:
+                    break
+                if has_control_tokens:
+                    history = (
+                        f"<|system|>{conversation['system']}\n<|end|>\n"
+                        if conversation["system"] else ""
+                    )
+                else:
+                    if conversation["system"]:
+                        history = (
+                            f"[SYSTEM]\n{conversation['system']}\n\n"
+                        )
+                    else:
+                        history = ""
+
+                for turn_index, turn in enumerate(conversation["turns"], 1):
+                    user_block = (
+                        f"<|user|>{turn['user']}\n<|end|>\n<|assistant|>"
+                        if has_control_tokens
+                        else f"[USER]\n{turn['user']}\n[ASSISTANT]\n"
+                    )
+                    prompt = history + user_block
+                    if len(tokenizer.encode(prompt).ids) > model.config.max_context:
+                        if not history:
+                            raise ValueError(
+                                f"Conversation {conversation['id']} turn {turn_index} "
+                                "exceeds max_context by itself."
+                            )
+                        reserved_for_turn = len(tokenizer.encode(user_block).ids)
+                        history_budget = model.config.max_context - reserved_for_turn
+                        if history_budget < 1:
+                            raise ValueError(
+                                f"Conversation {conversation['id']} turn {turn_index} "
+                                "cannot fit within max_context."
+                            )
+                        history = trim_chat_history(
+                            history,
+                            tokenizer,
+                            token_budget=history_budget,
+                            has_control_tokens=has_control_tokens,
+                        )
+                        prompt = history + user_block
+                        if len(tokenizer.encode(prompt).ids) > model.config.max_context:
+                            raise ValueError(
+                                f"Conversation {conversation['id']} turn {turn_index} "
+                                "still exceeds max_context after whole-turn trimming."
+                            )
+
+                    prediction = generate(
+                        model,
+                        tokenizer,
+                        prompt,
+                        max_new_tokens=max_new_tokens,
+                        temperature=0.0,
+                        top_k=0,
+                        top_p=1.0,
+                        thinking_steps=thinking_steps,
+                    )
+                    lexical_exact = (
+                        normalize_answer(prediction)
+                        == normalize_answer(turn["reference"])
+                    )
+                    lexical_f1 = token_f1(prediction, turn["reference"])
+                    task_passed, scoring_error = _score_task(
+                        prediction,
+                        turn["reference"],
+                        turn["scorer"],
+                        turn["tolerance"],
+                    )
+                    exact += int(lexical_exact)
+                    passed += int(task_passed)
+                    f1_total += lexical_f1
+
+                    category = category_stats[turn["category"]]
+                    category["count"] += 1
+                    category["exact_match"] += int(lexical_exact)
+                    category["passed"] += int(task_passed)
+                    category["token_f1"] += lexical_f1
+                    category["scorers"].add(turn["scorer"])
+                    language = language_stats[turn["language"]]
+                    language["count"] += 1
+                    language["passed"] += int(task_passed)
+                    cases.append({
+                        "conversation_id": conversation["id"],
+                        "turn_index": turn_index,
+                        "category": turn["category"],
+                        "language": turn["language"],
+                        "scorer": turn["scorer"],
+                        "user": turn["user"],
+                        "reference": turn["reference"],
+                        "prediction": prediction,
+                        "passed": bool(task_passed),
+                        "scoring_error": scoring_error,
+                        "exact_match": bool(lexical_exact),
+                        "token_f1": float(lexical_f1),
+                        "history_tokens_before_turn": len(tokenizer.encode(history).ids),
+                    })
+
+                    if has_control_tokens:
+                        history = prompt + prediction + "\n<|end|>\n"
+                    else:
+                        history = prompt + prediction + "\n"
+                    conversations += int(turn_index == len(conversation["turns"]))
+
+    finally:
+        model.train(was_training)
+
+    total_turns = len(cases)
+    if total_turns == 0:
+        raise ValueError("Conversation evaluation file contained no usable turns.")
+
+    categories = {}
+    for name, values in sorted(category_stats.items()):
+        count = int(values["count"])
+        categories[name] = {
+            "turns": count,
+            "scorers": sorted(values["scorers"]),
+            "task_pass_rate": values["passed"] / count,
+            "task_pass_rate_wilson_95": _wilson_interval(int(values["passed"]), count),
+            "exact_match": values["exact_match"] / count,
+            "mean_token_f1": values["token_f1"] / count,
+        }
+    languages = {}
+    for name, values in sorted(language_stats.items()):
+        count = int(values["count"])
+        languages[name] = {
+            "turns": count,
+            "task_pass_rate": values["passed"] / count,
+            "task_pass_rate_wilson_95": _wilson_interval(int(values["passed"]), count),
+        }
+    return {
+        "format": "qmini-conversation-evaluation-v1",
+        "model_parameters": model.parameter_report()["total"],
+        "dataset": str(Path(dataset_path)),
+        "conversations": conversations,
+        "turns": total_turns,
+        "task_pass_rate": passed / total_turns,
+        "task_pass_rate_wilson_95": _wilson_interval(passed, total_turns),
+        "exact_match": exact / total_turns,
+        "mean_token_f1": f1_total / total_turns,
+        "categories": categories,
+        "languages": languages,
+        "cases": cases,
+        "history_policy": (
+            "Generated assistant messages are reused as context. When necessary, only "
+            "whole oldest turns are removed; role/end markers are preserved."
+        ),
+        "scoring_note": (
+            "Turn-wise scoring is lexical or structured numeric/JSON checks. It does not "
+            "prove factuality, safe behavior, reasoning, or code execution correctness."
+        ),
+    }
