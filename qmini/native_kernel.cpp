@@ -107,10 +107,10 @@ static int64_t qmini_accumulate_i8_q2(
 #endif
 }
 
-// Packed row layout: four signed quaternary values per byte:
-// 00=-2, 01=-1, 10=+1, 11=+2.
-// The inner product uses integer accumulation; scales and bias are applied once
-// after the accumulator is reduced. ARM builds use NEON when the target supports it.
+// Q2-v1 legacy symbols are {-2,-1,+1,+2}; Q2-v2 production symbols are
+// {-1,-0.5,+0.5,+1}. Both use four symbols per byte and row scales.
+// Integer accumulation uses doubled half-units and applies the 0.5 factor
+// exactly once. ARM builds use NEON when the target supports it.
 QMINI_EXPORT int qmini_linear_i8_v2(
     const int8_t* input,
     const uint8_t* packed_weights,
