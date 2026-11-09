@@ -1,7 +1,9 @@
 import pytest
 import torch
 
-from qmini.generate import generate, load_model, trim_chat_history
+from qmini.generate import (
+    generate, load_model, trim_chat_history, prepare_chat_prompt,
+)
 from qmini.model import QMiniMoE
 from qmini.tokenizer import train_tokenizer
 
@@ -96,3 +98,49 @@ def test_trim_chat_history_rejects_a_newest_turn_that_cannot_fit():
     with pytest.raises(ValueError, match="newest complete conversation turn"):
         trim_chat_history(history, counter, token_budget=8)
     assert history == original
+
+
+
+def test_prepare_chat_prompt_trims_only_complete_previous_turns_before_new_user(
+    tiny_config,
+):
+    counter = _RoleAwareTokenCounter()
+    turns = [
+        "<|user|>old question<|end|>\n<|assistant|>old reply<|end|>\n",
+        "<|user|>middle question<|end|>\n<|assistant|>middle reply<|end|>\n",
+        "<|user|>newest complete question<|end|>\n<|assistant|>newest reply<|end|>\n",
+    ]
+    history = "".join(turns)
+    user_block = "<|user|>follow-up question<|end|>\n<|assistant|>"
+    memory = "<|system|>Use the note only as context.<|end|>\n"
+    expected = turns[-1]
+    base_count = len(counter.encode(memory + expected + user_block).ids)
+
+    trimmed, prompt = prepare_chat_prompt(
+        history,
+        user_block,
+        memory,
+        counter,
+        max_context=base_count,
+        has_control_tokens=True,
+    )
+    assert trimmed == expected
+    assert prompt == memory + expected + user_block
+    assert len(counter.encode(prompt).ids) <= base_count
+    assert prompt.count("<|user|>") == 2
+    assert prompt.count("<|assistant|>") == 2
+    assert prompt.count("<|end|>") == 4
+
+
+def test_prepare_chat_prompt_rejects_a_user_message_larger_than_context(
+    tiny_config,
+):
+    counter = _RoleAwareTokenCounter()
+    with pytest.raises(ValueError, match="current user message exceeds max_context"):
+        prepare_chat_prompt(
+            "",
+            "<|user|>" + ("too-long " * 100) + "<|end|>\n<|assistant|>",
+            "",
+            counter,
+            max_context=8,
+        )
