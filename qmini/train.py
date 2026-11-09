@@ -253,7 +253,11 @@ def _evaluate(
                     tokens, masks, batch_size, seq_len, rng, device,
                     window_index=window_index,
                 )
-                result = model(x, thinking_steps=thinking_steps)
+                result = (
+                    model(x)
+                    if thinking_steps is None
+                    else model(x, thinking_steps=thinking_steps)
+                )
                 nll_sum, target_count = _masked_cross_entropy_sum(
                     result["logits"], y, target_mask
                 )
