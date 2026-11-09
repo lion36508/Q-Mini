@@ -108,6 +108,7 @@ def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[o
     cursor = 0
     eof = len(buffer) == 0
     expect_value = True
+    values_seen = False
 
     while True:
         while cursor >= len(buffer) and not eof:
@@ -131,6 +132,8 @@ def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[o
         char = buffer[cursor]
         if expect_value:
             if char == "]":
+                if values_seen:
+                    raise ValueError(f"Trailing comma in JSON array in {path}.")
                 cursor += 1
                 trailing = buffer[cursor:] + handle.read()
                 if trailing.strip():
@@ -153,6 +156,7 @@ def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[o
                     eof = True
                 continue
             yield value
+            values_seen = True
             cursor = end
             expect_value = False
         else:
