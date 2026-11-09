@@ -338,3 +338,72 @@ def test_quantization_ablation_rejects_unmanifested_fp16_reference(
 
     with pytest.raises(FileNotFoundError, match="model_manifest.json provenance"):
         run_ablation(model_dir, tmp_path / "report.json", group_size=8)
+
+
+
+def test_quantization_ablation_rejects_stale_dense_snapshot_fingerprint(
+    tiny_config, tmp_path
+):
+    from qmini.config import QMiniConfig
+    from qmini.export import export_packed_state
+    from qmini.model import QMiniMoE
+    from qmini.quantization_ablation import run_ablation
+
+    config = QMiniConfig.from_dict(tiny_config.to_dict())
+    model_dir = tmp_path / "tampered-final-model"
+    model_dir.mkdir()
+    model = QMiniMoE(config)
+    dense_path = model_dir / "model.pt"
+    packed_path = model_dir / "model.qmini.npz"
+    config.save(model_dir / "config.json")
+    torch.save(model.state_dict(), dense_path)
+    export_packed_state(model.state_dict(), config, packed_path)
+    manifest = {
+        "format": "qmini-final-model-v2",
+        "config": config.to_dict(),
+        "parameters": model.parameter_report()["total"],
+        "packed_export": packed_path.name,
+        "packed_export_bytes": packed_path.stat().st_size,
+        "packed_export_sha256": hashlib.sha256(packed_path.read_bytes()).hexdigest(),
+        "dense_snapshot_bytes": dense_path.stat().st_size,
+        "dense_snapshot_sha256": "0" * 64,
+    }
+    (model_dir / "model_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="dense snapshot SHA-256"):
+        run_ablation(model_dir, tmp_path / "stale-report.json", group_size=8)
+
+
+def test_quantization_ablation_rejects_manifest_path_traversal(
+    tiny_config, tmp_path
+):
+    from qmini.config import QMiniConfig
+    from qmini.model import QMiniMoE
+    from qmini.quantization_ablation import run_ablation
+
+    config = QMiniConfig.from_dict(tiny_config.to_dict())
+    model_dir = tmp_path / "bad-manifest-model"
+    model_dir.mkdir()
+    config.save(model_dir / "config.json")
+    model = QMiniMoE(config)
+    torch.save(model.state_dict(), model_dir / "model.pt")
+    (model_dir / "model_manifest.json").write_text(
+        json.dumps({
+            "format": "qmini-final-model-v2",
+            "config": config.to_dict(),
+            "parameters": model.parameter_report()["total"],
+            "packed_export": "../outside.qmini.npz",
+            "packed_export_bytes": 1,
+            "packed_export_sha256": "0" * 64,
+            "dense_snapshot_bytes": (model_dir / "model.pt").stat().st_size,
+            "dense_snapshot_sha256": hashlib.sha256(
+                (model_dir / "model.pt").read_bytes()
+            ).hexdigest(),
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="local .npz packed Q2 export"):
+        run_ablation(model_dir, tmp_path / "bad-path-report.json", group_size=8)
