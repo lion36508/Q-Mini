@@ -234,3 +234,68 @@ def test_multi_turn_evaluator_rejects_an_overlong_single_turn(
         evaluate.evaluate_conversation_file(
             model, ControlTokenizer(), dataset, max_new_tokens=4
         )
+
+
+
+def test_multi_turn_evaluator_reports_whole_turn_eviction_at_context_limit(
+    tiny_config, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    model = QMiniMoE(tiny_config)
+    dataset = tmp_path / "context-eviction.jsonl"
+    dataset.write_text(
+        json.dumps({
+            "id": "context-eviction",
+            "language": "en",
+            "system": "Follow the instruction.",
+            "turns": [
+                {
+                    "user": "old detail " * 48,
+                    "reference": "ok",
+                    "scorer": "contains",
+                },
+                {
+                    "user": "What was my note?",
+                    "reference": "ok",
+                    "scorer": "contains",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    class ControlTokenizer:
+        markers = {"<|system|>", "<|user|>", "<|assistant|>", "<|end|>"}
+
+        def token_to_id(self, token):
+            return 1 if token in self.markers else None
+
+        def encode(self, text):
+            import re
+            return SimpleNamespace(
+                ids=re.findall(
+                    r"<\|(?:system|user|assistant)\|>|<\|end\|>|[^\\s<]+",
+                    text,
+                )
+            )
+
+    prompts = []
+    monkeypatch.setattr(
+        evaluate,
+        "generate",
+        lambda _model, _tokenizer, prompt, **kwargs: (
+            prompts.append(prompt) or "ok"
+        ),
+    )
+    report = evaluate.evaluate_conversation_file(
+        model, ControlTokenizer(), dataset, max_new_tokens=4
+    )
+
+    assert report["turns"] == 2
+    assert report["cases"][0]["history_turns_dropped_before_turn"] == 0
+    assert report["cases"][1]["history_turns_dropped_before_turn"] == 1
+    assert "<|system|>Follow the instruction.<|end|>" in prompts[1]
+    assert "<|user|>old detail" not in prompts[1]
+    assert "What was my note?" in prompts[1]
+    assert model.training is True
