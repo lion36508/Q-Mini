@@ -47,19 +47,55 @@ def _finish_metrics(total: dict[str, float]) -> dict[str, float]:
     }
 
 
-def run_ablation(model_dir: Path, output_path: Path, group_size: int) -> dict[str, Any]:
-    config_path = model_dir / "config.json"
-    checkpoint_path = model_dir / "model.pt"
-    if not config_path.is_file() or not checkpoint_path.is_file():
+def run_ablation(
+    model_dir: Path,
+    output_path: Path,
+    group_size: int,
+    checkpoint_path: Path | None = None,
+) -> dict[str, Any]:
+    """Compare formats using a Q-Mini final snapshot or own training checkpoint."""
+    source_path = Path(model_dir).expanduser()
+    if checkpoint_path is not None:
+        weight_path = Path(checkpoint_path).expanduser()
+    elif source_path.is_file():
+        weight_path = source_path
+    elif (source_path / "model.pt").is_file():
+        weight_path = source_path / "model.pt"
+    elif (source_path / "latest.pt").is_file():
+        weight_path = source_path / "latest.pt"
+    else:
         raise FileNotFoundError(
-            "This weight-only ablation requires a Q-Mini final_model directory "
-            "containing config.json and model.pt. Do not use external/pretrained weights."
+            "Provide a Q-Mini final_model directory with model.pt, a training run "
+            "directory with latest.pt, or an explicit --checkpoint. External/pretrained "
+            "weights are not accepted."
         )
 
-    config = QMiniConfig.from_json(config_path)
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    loaded = torch.load(weight_path, map_location="cpu", weights_only=True)
+    if not isinstance(loaded, dict) or not loaded:
+        raise ValueError("Selected Q-Mini weight source is not a non-empty dictionary.")
+
+    if loaded.get("format") in {"qmini-checkpoint-v1", "qmini-checkpoint-v2"}:
+        if not isinstance(loaded.get("model"), dict) or not isinstance(loaded.get("config"), dict):
+            raise ValueError("Q-Mini training checkpoint is missing its model/config state.")
+        state = loaded["model"]
+        config = QMiniConfig.from_dict(loaded["config"])
+        source_kind = "qmini-training-checkpoint"
+    else:
+        config_path = (
+            source_path / "config.json"
+            if source_path.is_dir()
+            else weight_path.parent / "config.json"
+        )
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"Config file not found beside model weights: {config_path}"
+            )
+        config = QMiniConfig.from_json(config_path)
+        state = loaded
+        source_kind = "qmini-final-model-state-dict"
+
     if not isinstance(state, dict) or not state:
-        raise ValueError("model.pt is not a non-empty tensor state dictionary.")
+        raise ValueError("Q-Mini model state is not a non-empty tensor dictionary.")
 
     formats = ("fp16", "q2", "ternary", "int4")
     totals = {name: _metric_accumulator() for name in formats}
@@ -150,7 +186,9 @@ def run_ablation(model_dir: Path, output_path: Path, group_size: int) -> dict[st
 
     report = {
         "format": "qmini-weight-quantization-ablation-v1",
-        "source_model_dir": str(model_dir.resolve()),
+        "source_model_dir": str(source_path.resolve()),
+        "source_weight_path": str(weight_path.resolve()),
+        "source_kind": source_kind,
         "source_config": config.to_dict(),
         "source_parameter_count": config.estimated_parameter_count(),
         "matrix_tensor_count": matrix_count,
@@ -168,7 +206,7 @@ def run_ablation(model_dir: Path, output_path: Path, group_size: int) -> dict[st
             "This report measures weight reconstruction error only.",
             "It does not measure validation NLL, assistant quality, runtime speed or peak RSS.",
             "All formats are experimental; this script does not change the model's default quantizer.",
-            "Only Q-Mini's own model.pt checkpoint is accepted; no external pretrained weights are loaded.",
+            "Only Q-Mini-owned final_model/model.pt or its own latest.pt training checkpoint is accepted; no external pretrained weights are loaded.",
         ],
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,14 +226,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compare FP16, Q2, zero-preserving ternary and groupwise INT4 weight error."
     )
-    parser.add_argument("--model-dir", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--model-dir", help="Q-Mini final_model directory or training run directory")
+    source.add_argument("--checkpoint", help="Q-Mini-owned latest.pt training checkpoint")
     parser.add_argument("--output", default="quantization-ablation.json")
     parser.add_argument("--group-size", type=int, default=64)
     args = parser.parse_args()
     if args.group_size < 1:
         parser.error("--group-size must be positive.")
+    model_source = (
+        Path(args.model_dir).expanduser()
+        if args.model_dir is not None
+        else Path(args.checkpoint).expanduser()
+    )
     report = run_ablation(
-        Path(args.model_dir).expanduser(),
+        model_source,
         Path(args.output).expanduser(),
         args.group_size,
     )
