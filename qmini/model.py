@@ -331,17 +331,33 @@ class SparseTop1MoE(nn.Module):
 
     def __init__(self, config: QMiniConfig):
         super().__init__()
-        self.router_norm = RMSNorm(config.d_model, config.rms_norm_eps)
-        self.router = QLinear(config.d_model, config.n_experts)
+        self.n_experts = config.n_experts
+        # A single expert is a dense FFN, not an MoE. A one-element softmax
+        # is identically one and creates a router with no useful gradient.
+        self.router_norm = (
+            RMSNorm(config.d_model, config.rms_norm_eps)
+            if self.n_experts > 1 else None
+        )
+        self.router = (
+            QLinear(config.d_model, self.n_experts)
+            if self.n_experts > 1 else None
+        )
         self.experts = nn.ModuleList([
             SparseExpert(config.d_model, config.d_hidden)
-            for _ in range(config.n_experts)
+            for _ in range(self.n_experts)
         ])
-        self.n_experts = config.n_experts
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         shape = x.shape
         flat = x.reshape(-1, shape[-1])
+        if self.n_experts == 1:
+            output = self.experts[0](flat).reshape(shape)
+            aux_loss = x.new_zeros((), dtype=torch.float32)
+            counts = torch.tensor(
+                [flat.shape[0]], device=x.device, dtype=torch.int64
+            )
+            return output, aux_loss, counts
+
         probabilities = F.softmax(self.router(self.router_norm(x)).float(), dim=-1)
         flat_probs = probabilities.reshape(-1, self.n_experts)
         selected = flat_probs.argmax(dim=-1)
