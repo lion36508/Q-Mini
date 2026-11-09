@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -42,14 +44,30 @@ def load_model(model_dir: str | Path, device: str | None = None):
                 f"No compatible weights found. Expected {packed_path} for CPU packed "
                 f"inference or {weights_path} for dense PyTorch inference."
             )
-        try:
-            state = torch.load(weights_path, map_location="cpu", weights_only=True)
-        except TypeError:
-            state = torch.load(weights_path, map_location="cpu")
+        # Model files are tensor-only artifacts; never use unrestricted pickle.
+        state = torch.load(weights_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state, strict=True)
         model.to(target).eval()
 
-    tokenizer = load_tokenizer(root / "tokenizer.json")
+    tokenizer_path = root / "tokenizer.json"
+    tokenizer = load_tokenizer(tokenizer_path)
+    model_manifest_path = root / "model_manifest.json"
+    if model_manifest_path.is_file():
+        try:
+            manifest = json.loads(model_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Could not read model manifest: {model_manifest_path}") from exc
+        expected_tokenizer_hash = manifest.get("tokenizer_sha256")
+        if expected_tokenizer_hash:
+            digest = hashlib.sha256()
+            with tokenizer_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_tokenizer_hash:
+                raise ValueError(
+                    "Tokenizer SHA-256 differs from the tokenizer used for training. "
+                    "Restore the matching tokenizer.json for this model."
+                )
     if tokenizer.get_vocab_size() != config.vocab_size:
         raise ValueError(
             f"Tokenizer vocabulary ({tokenizer.get_vocab_size()}) does not match "
