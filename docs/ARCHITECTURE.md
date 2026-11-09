@@ -27,6 +27,8 @@ No Transformer attention, Q/K/V or dot-product attention modules are present. Le
 
 Each convolution is padded only on the left by `dilation * (kernel_size - 1)`. No future token can affect an earlier output. The convolution path has a finite receptive field of `1 + (kernel_size - 1) * sum(dilations)`. Hybrid profiles additionally maintain a fixed-width learned recurrent state, updated as `s[t] = a[t] * s[t-1] + (1-a[t]) * u[t]`. Training uses a differentiable parallel associative scan; token-by-token generation uses the equivalent recurrent update. This state compresses prior information and cannot guarantee exact retrieval of arbitrary earlier text.
 
+`max_context` bounds the length of one batch forward or initial prompt prefill. It does not cap the total length of a streaming decode. Streaming keeps the fixed-size convolution caches and one diagonal SSM state per active layer; it never replays the prompt after each generated token. Batch/stream parity is tested within the configured prefill length. Beyond that length, the model has recurrent compressed-history semantics, not an exact rolling-window transcript: old information may influence the state, but exact arbitrary-token recall is not guaranteed.
+
 ## Quantization
 
 Trainable master weights remain FP32 and are fake-quantized row-wise to {-2,-1,+1,+2} with STE. Activations use per-token AbsMax scaling to signed INT8 [-127,127], also with STE. The deployment archive stores four 2-bit codes per byte, one FP32 row scale and FP16 one-dimensional vectors. Optimizer state is not 2-bit.
