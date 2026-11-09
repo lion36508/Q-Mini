@@ -111,3 +111,123 @@ def test_task_evaluation_uses_numeric_and_json_scorers_with_language_reports(
     assert report["languages"]["as"]["task_pass_rate"] == 0.0
     assert report["cases"][0]["passed"] is True
     assert report["cases"][2]["scoring_error"].startswith("Invalid JSON:")
+
+
+
+def test_multi_turn_conversation_evaluation_reuses_prior_assistant_turns(
+    tiny_config, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    model = QMiniMoE(tiny_config)
+    dataset = tmp_path / "multi-turn.jsonl"
+    conversations = [
+        {
+            "id": "english-math",
+            "language": "en",
+            "system": "Answer with the requested number.",
+            "turns": [
+                {
+                    "user": "What is six times seven?",
+                    "reference": "42",
+                    "scorer": "numeric",
+                },
+                {
+                    "user": "Repeat the number you just gave.",
+                    "reference": "42",
+                    "scorer": "numeric",
+                },
+            ],
+        },
+        {
+            "id": "hindi-math",
+            "language": "hi",
+            "turns": [
+                {
+                    "user": "एक और एक कितना होता है?",
+                    "reference": "2",
+                    "scorer": "numeric",
+                }
+            ],
+        },
+    ]
+    dataset.write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in conversations),
+        encoding="utf-8",
+    )
+
+    class ControlTokenizer:
+        markers = {
+            "<|system|>", "<|user|>", "<|assistant|>", "<|end|>"
+        }
+
+        def token_to_id(self, token):
+            return 1 if token in self.markers else None
+
+        def encode(self, text):
+            import re
+            return SimpleNamespace(
+                ids=re.findall(r"<\|[^>]+\|>|\S+", text)
+            )
+
+    prompts = []
+    predictions = iter(["42", "42", "2"])
+
+    def fake_generate(_model, _tokenizer, prompt, **kwargs):
+        prompts.append(prompt)
+        assert kwargs["temperature"] == 0.0
+        return next(predictions)
+
+    monkeypatch.setattr(evaluate, "generate", fake_generate)
+    report = evaluate.evaluate_conversation_file(
+        model,
+        ControlTokenizer(),
+        dataset,
+        max_new_tokens=8,
+    )
+
+    assert report["format"] == "qmini-conversation-evaluation-v1"
+    assert report["conversations"] == 2
+    assert report["turns"] == 3
+    assert report["task_pass_rate"] == 1.0
+    assert set(report["languages"]) == {"en", "hi"}
+    assert report["languages"]["en"]["turns"] == 2
+    assert "<|assistant|>42\n<|end|>" in prompts[1]
+    assert "Repeat the number you just gave." in prompts[1]
+    assert len(report["cases"]) == 3
+    assert model.training is False
+
+
+def test_multi_turn_evaluator_rejects_an_overlong_single_turn(
+    tiny_config, tmp_path
+):
+    from types import SimpleNamespace
+
+    model = QMiniMoE(tiny_config)
+    dataset = tmp_path / "overlong-conversation.jsonl"
+    dataset.write_text(
+        json.dumps({
+            "turns": [
+                {
+                    "user": "word " * (tiny_config.max_context * 2),
+                    "reference": "answer",
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    class ControlTokenizer:
+        def token_to_id(self, token):
+            return 1 if token in {
+                "<|system|>", "<|user|>", "<|assistant|>", "<|end|>"
+            } else None
+
+        def encode(self, text):
+            import re
+            return SimpleNamespace(ids=re.findall(r"<\|[^>]+\|>|\S+", text))
+
+    with pytest.raises(ValueError, match="exceeds max_context by itself"):
+        evaluate.evaluate_conversation_file(
+            model, ControlTokenizer(), dataset, max_new_tokens=4
+        )
