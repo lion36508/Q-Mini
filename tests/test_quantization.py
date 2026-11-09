@@ -89,7 +89,7 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
 ):
     from qmini.model import QMiniMoE
     from qmini.config import QMiniConfig
-    from scripts.quantization_ablation import run_ablation
+    from qmini.quantization_ablation import run_ablation
 
     model_dir = tmp_path / "final_model"
     model_dir.mkdir()
@@ -138,7 +138,7 @@ def test_quantization_ablation_accepts_qmini_owned_latest_checkpoint(
 ):
     from qmini.model import QMiniMoE
     from qmini.config import QMiniConfig
-    from scripts.quantization_ablation import run_ablation
+    from qmini.quantization_ablation import run_ablation
 
     config = QMiniConfig.from_dict(tiny_config.to_dict())
     model = QMiniMoE(config)
