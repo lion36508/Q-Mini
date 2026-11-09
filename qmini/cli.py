@@ -42,6 +42,14 @@ def main() -> int:
             "unique_active_parameters_per_token_top1": cfg.estimated_unique_active_parameter_count(),
             "fp32_weight_bytes": cfg.estimated_parameter_count() * 4,
             "fp32_adamw_state_lower_bound_bytes": cfg.estimated_adamw_training_state_bytes(),
+            "estimated_q2_fp16_export_bytes": cfg.estimated_packed_export_bytes(),
+            "estimated_q2_fp16_export_gb_decimal": cfg.estimated_packed_export_bytes() / 1_000_000_000,
+            "estimated_q2_fp16_export_gib": cfg.estimated_packed_export_bytes() / (1024 ** 3),
+            "deployment_weight_budget_bytes": 1_500_000_000,
+            "within_1_5gb_weight_artifact_budget": (
+                cfg.estimated_packed_export_bytes() <= 1_500_000_000
+            ),
+            "packed_weight_format": "2-bit signed quaternary weights + FP32 row scales + FP16 vectors",
             "dense_reference_tokens_at_20_per_parameter": cfg.reference_tokens_at_20_per_parameter(),
             "active_top1_reference_tokens_at_20_per_active_parameter": cfg.reference_tokens_at_20_per_active_parameter(),
             "max_context": cfg.max_context,
@@ -51,9 +59,11 @@ def main() -> int:
             "experts": cfg.n_experts,
             "active_experts_per_token": cfg.top_k,
             "warning": (
-                "20 tokens per parameter is a dense-LM planning heuristic, not a guarantee "
-                "or a validated sparse-MoE scaling law. Memory excludes activations, workspaces, "
-                "fragmentation and distributed communication."
+                "The packed export estimate is a raw storage upper bound for model weights, not a quality "
+                "guarantee; tokenizer and application files are separate. Two-bit quantization can reduce "
+                "accuracy and must be checked against held-out benchmarks. 20 tokens per parameter is a "
+                "dense-LM planning heuristic, not a validated sparse-MoE scaling law. Training memory "
+                "excludes activations, workspaces, fragmentation and distributed communication."
             ),
         }
         print(json.dumps(report, indent=2))
