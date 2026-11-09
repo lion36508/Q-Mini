@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import platform
 import time
 from pathlib import Path
@@ -84,6 +86,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--thinking-steps", type=int, default=2)
     parser.add_argument("--mode", choices=("forward", "decode", "both"), default="both")
+    parser.add_argument("--output", default=None, help="optional JSON path for this measured report")
     args = parser.parse_args()
 
     if args.batch_size < 1 or args.iterations < 1 or args.warmup < 0:
@@ -110,21 +113,48 @@ def main() -> None:
         0, config.vocab_size, (args.batch_size, args.seq_len), device=device
     )
 
-    print(f"python={platform.python_version()}")
-    print(f"torch={torch.__version__}")
-    print(f"platform={platform.platform()}")
-    print(f"device={device}")
-    print(f"cpu_model={cpu_model_name()}")
-    print(f"runtime_model_bundle={args.model_dir or 'random-initialized-config'}")
-    print(f"packed_q2_runtime={bool(getattr(model, '_qmini_packed_runtime', False))}")
     backend = native_kernel_status()
-    print(f"cpu_projection_backend={backend['backend']}")
-    print(f"arm_neon={backend['uses_neon']}")
-    print(f"parameters={model.parameter_report()['total']:,}")
-    print(f"prompt_tokens={args.batch_size * args.seq_len}")
-    print(f"thinking_steps={args.thinking_steps}")
-    print(f"warmup={args.warmup} measured_iterations={args.iterations}")
-    print("inputs=synthetic token IDs; tokenizer and sampling overhead are excluded")
+    report = {
+        "format": "qmini-benchmark-v1",
+        "python": platform.python_version(),
+        "pytorch": torch.__version__,
+        "platform": platform.platform(),
+        "device": str(device),
+        "cpu_model": cpu_model_name(),
+        "runtime_model": (
+            "trained-packed-q2"
+            if bool(getattr(model, "_qmini_packed_runtime", False))
+            else "trained-dense"
+            if args.model_dir
+            else "random-initialized-config"
+        ),
+        "packed_q2_runtime": bool(getattr(model, "_qmini_packed_runtime", False)),
+        "cpu_projection_backend": backend["backend"],
+        "arm_neon": backend["uses_neon"],
+        "parameters": model.parameter_report()["total"],
+        "config": config.to_dict(),
+        "batch_size": args.batch_size,
+        "prompt_tokens": args.batch_size * args.seq_len,
+        "thinking_steps": args.thinking_steps,
+        "warmup": args.warmup,
+        "measured_iterations": args.iterations,
+        "mode": args.mode,
+        "input_note": "synthetic token IDs; tokenizer and sampling overhead excluded",
+    }
+    print(f"python={report['python']}")
+    print(f"torch={report['pytorch']}")
+    print(f"platform={report['platform']}")
+    print(f"device={report['device']}")
+    print(f"cpu_model={report['cpu_model']}")
+    print(f"runtime_model={report['runtime_model']}")
+    print(f"packed_q2_runtime={report['packed_q2_runtime']}")
+    print(f"cpu_projection_backend={report['cpu_projection_backend']}")
+    print(f"arm_neon={report['arm_neon']}")
+    print(f"parameters={report['parameters']:,}")
+    print(f"prompt_tokens={report['prompt_tokens']}")
+    print(f"thinking_steps={report['thinking_steps']}")
+    print(f"warmup={report['warmup']} measured_iterations={report['measured_iterations']}")
+    print(report["input_note"])
 
     with torch.inference_mode():
         if args.mode in {"forward", "both"}:
@@ -138,6 +168,8 @@ def main() -> None:
             synchronize(device)
             elapsed = max(time.perf_counter() - start, 1e-9)
             tokens = args.batch_size * args.seq_len * args.iterations
+            report["forward_elapsed_seconds"] = elapsed
+            report["forward_input_tokens_per_second"] = tokens / elapsed
             print(f"forward_elapsed_seconds={elapsed:.4f}")
             print(f"forward_input_tokens_per_second={tokens / elapsed:.2f}")
 
@@ -166,19 +198,43 @@ def main() -> None:
             decode_elapsed = max(time.perf_counter() - decode_start, 1e-9)
             decoded_tokens = args.batch_size * args.iterations
 
+            report["prefill_elapsed_seconds"] = prefill_elapsed
+            report["prefill_input_tokens_per_second"] = (
+                args.batch_size * args.seq_len / prefill_elapsed
+            )
+            report["decode_elapsed_seconds"] = decode_elapsed
+            report["decode_tokens_per_second"] = decoded_tokens / decode_elapsed
+            report["decode_tokens_per_request"] = args.iterations
             print(f"prefill_elapsed_seconds={prefill_elapsed:.4f}")
             print(
                 f"prefill_input_tokens_per_second="
-                f"{args.batch_size * args.seq_len / prefill_elapsed:.2f}"
+                f"{report['prefill_input_tokens_per_second']:.2f}"
             )
             print(f"decode_elapsed_seconds={decode_elapsed:.4f}")
-            print(f"decode_tokens_per_second={decoded_tokens / decode_elapsed:.2f}")
+            print(f"decode_tokens_per_second={report['decode_tokens_per_second']:.2f}")
             print(f"decode_tokens_per_request={args.iterations}")
 
         if device.type == "cuda":
-            print(f"peak_cuda_memory_bytes={torch.cuda.max_memory_allocated(device)}")
+            report["peak_cuda_memory_bytes"] = int(torch.cuda.max_memory_allocated(device))
+            print(f"peak_cuda_memory_bytes={report['peak_cuda_memory_bytes']}")
         rss = peak_process_rss_bytes()
+        report["peak_process_rss_bytes"] = rss
         print(f"peak_process_rss_bytes={rss if rss is not None else 'unavailable'}")
+
+    if args.output:
+        destination = Path(args.output).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(report, handle, indent=2, default=list, allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print(f"benchmark_report={destination}")
 
 
 if __name__ == "__main__":
