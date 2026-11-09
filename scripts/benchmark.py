@@ -89,25 +89,23 @@ def main() -> None:
     if args.batch_size < 1 or args.iterations < 1 or args.warmup < 0:
         raise SystemExit("batch-size and iterations must be positive; warmup cannot be negative.")
 
-    config = QMiniConfig.from_json(args.config)
-    if not 1 <= args.seq_len <= config.max_context:
-        raise SystemExit("seq-len must be within configured context.")
-    if not 1 <= args.thinking_steps <= config.max_thinking_steps:
-        raise SystemExit("thinking-steps exceeds the configured limit.")
-
     if args.model_dir:
         from qmini.generate import load_model
         model, _tokenizer, device = load_model(args.model_dir, args.device)
         config = model.config
-        if args.thinking_steps > config.max_thinking_steps:
-            raise SystemExit(
-                f"thinking-steps exceeds model limit {config.max_thinking_steps}."
-            )
     else:
+        config = QMiniConfig.from_json(args.config)
         device = torch.device(
             args.device or ("cuda" if torch.cuda.is_available() else "cpu")
         )
         model = QMiniMoE(config).to(device).eval()
+
+    if not 1 <= args.seq_len <= config.max_context:
+        raise SystemExit("seq-len must be within the loaded model's configured context.")
+    if not 1 <= args.thinking_steps <= config.max_thinking_steps:
+        raise SystemExit(
+            f"thinking-steps must be 1..{config.max_thinking_steps} for this model."
+        )
     prompt_ids = torch.randint(
         0, config.vocab_size, (args.batch_size, args.seq_len), device=device
     )
