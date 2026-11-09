@@ -31,9 +31,9 @@ Each convolution is padded only on the left by `dilation * (kernel_size - 1)`. N
 
 ## Quantization
 
-Trainable master weights remain FP32 and are fake-quantized row-wise to {-2,-1,+1,+2} with STE. Activations use per-token AbsMax scaling to signed INT8 [-127,127], also with STE. The deployment archive stores four 2-bit codes per byte, one FP32 row scale and FP16 one-dimensional vectors. Optimizer state is not 2-bit.
+Trainable master weights remain FP32 and are fake-quantized using the Q2-v2 normalized codebook {-1,-0.5,+0.5,+1} with STE. Activations use per-token AbsMax scaling to signed INT8 [-127,127], also with STE. The deployment archive stores four 2-bit codes per byte, one FP32 row scale and FP16 one-dimensional vectors. Optimizer state is not 2-bit.
 
-The packed loader constructs the same module graph on the meta device, then installs packed buffers and small FP16 vectors. It does not materialize dense 5B FP32 matrices. CPU QLinear projections and the tied vocabulary projection use the C++17 INT8-by-Q2 kernel when `libqmini_kernel.so` is available. Without the kernel, the PyTorch fallback decodes one matrix at a time; the tied vocabulary projection decodes bounded row chunks. The depthwise convolution kernels are small and decoded lazily. The packed runtime is inference-only; training always uses FP32 master parameters and the PyTorch STE path.
+The packed loader constructs the same module graph on the meta device, then installs packed buffers and small FP16 vectors. New exports use Q2-v2 with row scale 2 * mean(abs(original row)); all-zero rows use scale zero. The loader continues to decode legacy Q2-v1 artifacts using the old {-2,-1,+1,+2} codebook. It does not materialize dense 5B FP32 matrices. CPU QLinear projections and the tied vocabulary projection use the C++17 INT8-by-Q2 kernel when `libqmini_kernel.so` is available. Without the kernel, the PyTorch fallback decodes one matrix at a time; the tied vocabulary projection decodes bounded row chunks. The depthwise convolution kernels are small and decoded lazily. The packed runtime is inference-only; training always uses FP32 master parameters and the PyTorch STE path.
 
 ## Sparse experts and refinement
 
@@ -85,3 +85,6 @@ The sparse configuration has 5,132,630,288 total parameters, 852,873,488 unique 
 \`configs/qmini_dense_853m.json\` is a single-expert dense reference with 852,281,344 parameters. It omits the one-expert router and router normalization because a one-element softmax is always 1 and produces no useful router gradient. It is close to the sparse profile's unique active parameter count, but it is not yet a scientifically controlled comparison: both variants must be trained on the same corpus, tokenizer, tokens seen, schedule and random seeds, then compared on the same held-out tasks and hardware.
 
 For batch 1 with the maximum configured thinking passes, the config planner estimates 80,527,360 bytes of persistent convolution/SSM/rolling-token state, and 1,409,085,024 bytes for packed weights + those caches + simplified activation/fallback buffers. This is an engineering estimate, not measured process RSS. Python/PyTorch runtime memory, allocator fragmentation, OS usage, tokenizer storage and archive decompression overlap are excluded. A 4 GB physical-RAM deployment claim must wait for measured peak RSS on the target handset.
+
+
+The normative production matrix-weight contract and versioned legacy decoder are specified in docs/Q2_QUANTIZATION_SPEC.md.
