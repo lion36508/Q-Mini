@@ -44,7 +44,10 @@ jobs:
       - name: Run audit and CLI checks
         run: |
           python -m qmini.cli audit --config configs/qmini_smoke.json
-          python -c "from qmini.config import QMiniConfig; from qmini.model import QMiniMoE; c=QMiniConfig.from_json('configs/qmini_research_134m.json'); n=QMiniMoE(c).parameter_report()['total']; print('Research profile parameters:', n); assert n == 134426200"
+          python -m qmini.cli plan --config configs/qmini_5b.json
+          python -c "from qmini.config import QMiniConfig; from qmini.model import QMiniMoE; c=QMiniConfig.from_json('configs/qmini_research_152m.json'); n=QMiniMoE(c).parameter_report()['total']; print('Hybrid research profile parameters:', n); assert n == 152483800"
+          python -c "from qmini.config import QMiniConfig; c=QMiniConfig.from_json('configs/qmini_5b.json'); assert c.estimated_parameter_count() == 5132630288"
+          python -c "from qmini.config import QMiniConfig; c=QMiniConfig.from_json('configs/qmini_5m.json'); assert c.estimated_parameter_count() == 5245996"
           python -m qmini.cli --help
           python -m qmini.cli memory --help
           python scripts/benchmark.py --config configs/qmini_smoke.json --seq-len 8 --iterations 3 --warmup 1 --mode both
