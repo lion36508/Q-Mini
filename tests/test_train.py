@@ -36,7 +36,7 @@ def _write_stream(path, vocab_size, length, seed):
 def test_training_rejects_malformed_public_api_arguments(
     tmp_path, tiny_config, field, value, error
 ):
-    kwargs = {"steps": 1}
+    kwargs = {"steps": 1, "seq_len": 8}
     kwargs[field] = value
     with pytest.raises(error):
         train_model(
