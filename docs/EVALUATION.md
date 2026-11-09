@@ -133,3 +133,10 @@ python -m qmini.cli eval-conversations \\
 Generated assistant replies are fed back into the prompt for the next turn. The evaluator preserves system/role/end markers and removes only complete oldest turns when the prompt reaches \`max_context\`. If the current user turn cannot fit by itself, evaluation fails explicitly rather than silently truncating it. The report contains per-turn predictions, task-specific pass rate, Wilson intervals, per-category/per-language results and the history-token count before each turn.
 
 The benchmark set must remain held out from tokenizer fitting, pretraining and SFT. Use numeric/JSON scorers for objectively structured answers where possible; lexical exact match and token F1 remain diagnostics. Human review and externally checked answers are still needed for open-ended factuality, science, reasoning and code behavior.
+
+
+## Q2-v2 production format and legacy archive compatibility
+
+All new exports use Q2-v2 normalized symbols {-1,-0.5,+0.5,+1}, with FP32 row scale 2 * mean(abs(original row)); an all-zero matrix row has scale zero. The packed runtime, Python fallback, depthwise convolution and native C++ ABI carry an explicit format version. Legacy Q2-v1 exports continue to decode under their original {-2,-1,+1,+2} table. The exact normative codebook, metadata and scale invariants are in docs/Q2_QUANTIZATION_SPEC.md.
+
+Ternary/INT4/INT8 weight quantizers remain experimental ablation methods and are not production exporter formats.
