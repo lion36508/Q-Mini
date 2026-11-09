@@ -126,6 +126,25 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
         assert evaluation["supervised_target_tokens"] > 0
         assert evaluation["seed"] == 991
     assert report["evaluation_dataset_sha256"] == hashlib.sha256(tokens_path.read_bytes()).hexdigest()
+    assert report["format"] == "qmini-weight-quantization-ablation-v3"
+    assert "q2_row_scale_reports" in report
+    assert "component_metrics" in report
+    assert "payload_breakdown" in report
+    assert report["payload_breakdown"]["q2"]["matrix_symbol_or_fp16_bytes"] > 0
+    assert report["payload_breakdown"]["q2"]["scale_bytes"] > 0
+    assert (
+        report["payload_breakdown"]["q2"]["total_weight_payload_bytes"]
+        == report["formats"]["q2"]["estimated_weight_payload_bytes"]
+    )
+    assert report["q2_row_scale_reports"]
+    assert any(
+        "router" in name
+        for name in report["tensor_results"]
+    ) is any(
+        item["tensor_count"] > 0
+        for item in report["component_metrics"].values()
+        if "router" in report["component_metrics"]
+    )
     for metrics in report["formats"].values():
         assert np.isfinite(metrics["relative_l2_error"])
         assert np.isfinite(metrics["cosine_similarity"])
