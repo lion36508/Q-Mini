@@ -34,3 +34,32 @@ def test_cli_thinking_steps_allow_custom_model_limit_above_four():
 
 def test_cli_thinking_steps_accept_model_default():
     _validate_thinking_steps(None, 2)
+
+
+def test_tokenizer_cli_rejects_zero_validation_fraction_at_public_boundary(
+    tmp_path, monkeypatch
+):
+    import sys
+    from qmini.cli import main
+
+    corpus = tmp_path / "cli-corpus.jsonl"
+    corpus.write_text(
+        '{"text":"First independent tokenizer document."}\n'
+        '{"text":"Second independent tokenizer document."}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qmini", "tokenizer",
+            "--data-dir", str(corpus),
+            "--output", str(tmp_path / "tokenizer.json"),
+            "--vocab-size", "300",
+            "--min-frequency", "1",
+            "--config-output", str(tmp_path / "config.json"),
+            "--valid-fraction", "0",
+        ],
+    )
+    with pytest.raises(ValueError, match="greater than 0 and below 0.5"):
+        main()
