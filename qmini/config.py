@@ -190,10 +190,12 @@ class QMiniConfig:
         ceil4 = lambda value: (value + 3) // 4
 
         total = self.estimated_parameter_count()
+        state_projection_factor = 4 if self.use_state_space else 0
+        shared_projection_factor = 3 + state_projection_factor
         matrix_parameters = (
             vocab * d
             + blocks * (
-                7 * d * d
+                shared_projection_factor * d * d
                 + d * self.kernel_size
                 + d * experts
                 + experts
@@ -207,10 +209,8 @@ class QMiniConfig:
         packed_weight_bytes = (
             vocab * ceil4(d)
             + blocks * (
-                2 * d * ceil4(d)
+                shared_projection_factor * d * ceil4(d)
                 + d * ceil4(self.kernel_size)
-                + d * ceil4(d)
-                + 4 * d * ceil4(d)
                 + experts * ceil4(d)
                 + experts * (
                     h * ceil4(d)
@@ -219,7 +219,7 @@ class QMiniConfig:
             )
         )
         q2_row_count = vocab + blocks * (
-            7 * d + experts * (h + d + 1)
+            shared_projection_factor * d + experts * (h + d + 1)
         )
         row_scale_bytes = q2_row_count * 4
         fp16_vector_bytes = vector_parameters * 2
