@@ -82,3 +82,30 @@ def test_packed_runtime_has_bounded_pytorch_fallback(
 
     assert actual.shape == expected.shape
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+def test_dense_single_expert_archive_loads_without_router(tiny_config, tmp_path):
+    from qmini.export import verify_packed_export
+    from qmini.model import QMiniMoE
+
+    values = tiny_config.to_dict()
+    values["n_experts"] = 1
+    config = type(tiny_config).from_dict(values)
+    reference = QMiniMoE(config).eval()
+    path = export_packed_state(
+        reference.state_dict(), config, tmp_path / "dense.qmini.npz"
+    )
+    packed_report = verify_packed_export(path)
+    assert packed_report["parameter_count"] == config.estimated_parameter_count()
+    assert packed_report["decoded_payload_bytes"] + 65536 == config.estimated_packed_export_bytes()
+
+    packed = load_packed_model(path, expected_config=config)
+    assert not any(
+        "router" in name
+        for name, _ in packed.named_parameters()
+    )
+    ids = torch.randint(0, config.vocab_size, (1, 7))
+    with torch.inference_mode():
+        expected = reference(ids)["logits"]
+        actual = packed(ids)["logits"]
+    assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
