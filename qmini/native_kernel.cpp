@@ -49,7 +49,7 @@ static int64_t qmini_accumulate_i8_q2(
     int q2_version
 ) {
 #if QMINI_HAS_NEON
-    // Expand eight 2-bit weights at a time, multiply signed INT8 x {-2,-1,1,2},
+    // Expand eight 2-bit weights at a time, multiply signed INT8 x Q2 half-units,
     // widen products, and pairwise-accumulate in INT32 lanes. Flush each 512
     // input features into INT64 to keep the SIMD partial accumulator bounded.
     int64_t accumulator = 0;
