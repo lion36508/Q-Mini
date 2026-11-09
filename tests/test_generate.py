@@ -42,7 +42,7 @@ class _RoleAwareTokenCounter:
         from types import SimpleNamespace
 
         tokens = re.findall(
-            r"<\|(?:system|user|assistant|tool|other)\|>|<\|end\|>|\[(?:USER|ASSISTANT)\]|\S+",
+            r"<\|(?:system|user|assistant|tool|other)\|>|<\|end\|>|\[(?:SYSTEM|USER|ASSISTANT)\]|[^\s<\[]+",
             text,
         )
         return SimpleNamespace(ids=tokens)
