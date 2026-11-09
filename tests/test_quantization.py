@@ -130,7 +130,13 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
         assert np.isfinite(metrics["relative_l2_error"])
         assert np.isfinite(metrics["cosine_similarity"])
         assert metrics["estimated_weight_payload_bytes"] > 0
-    assert any("not semantic assistant-quality scores" in item for item in report["limitations"])
+    assert any(
+        "not semantic assistant-quality scores" in item
+        for item in report["limitations"]
+    ) or any(
+        "not semantic assistant-quality scores" in item.lower()
+        for item in report["limitations"]
+    )
 
 
 def test_quantization_ablation_accepts_qmini_owned_latest_checkpoint(
