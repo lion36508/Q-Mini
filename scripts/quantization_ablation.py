@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -54,6 +55,13 @@ def run_ablation(
     output_path: Path,
     group_size: int,
     checkpoint_path: Path | None = None,
+    eval_tokens: Path | None = None,
+    eval_mask: Path | None = None,
+    eval_batch_size: int = 2,
+    eval_seq_len: int = 128,
+    eval_batches: int = 100,
+    eval_seed: int = 42,
+    eval_device: str = "cpu",
 ) -> dict[str, Any]:
     """Compare formats using a Q-Mini final snapshot or own training checkpoint."""
     source_path = Path(model_dir).expanduser()
@@ -103,6 +111,9 @@ def run_ablation(
     totals = {name: _metric_accumulator() for name in formats}
     byte_counts = {name: 0 for name in formats}
     per_tensor: dict[str, Any] = {}
+    quality_states: dict[str, dict[str, torch.Tensor]] | None = (
+        {name: {} for name in formats} if eval_tokens is not None else None
+    )
     matrix_count = 0
     vector_count = 0
 
@@ -124,6 +135,8 @@ def run_ablation(
             vector_bytes = reference.numel() * 2
             for format_name in formats:
                 byte_counts[format_name] += vector_bytes
+                if quality_states is not None:
+                    quality_states[format_name][name] = approximation.reshape(value.shape).float()
             continue
 
         matrix_count += 1
@@ -192,12 +205,71 @@ def run_ablation(
             "group_size": group_size,
         }
         per_tensor[name] = row_report
+        if quality_states is not None:
+            quality_states["fp16"][name] = fp16.reshape(value.shape).float()
+            quality_states["int8"][name] = int8.reshape(value.shape).float()
+            quality_states["q2"][name] = q2.reshape(value.shape).float()
+            quality_states["ternary"][name] = ternary.reshape(value.shape).float()
+            quality_states["int4"][name] = int4.reshape(value.shape).float()
 
     if matrix_count == 0:
         raise ValueError("No matrix weights were found in this model state dictionary.")
 
+    heldout_evaluation = None
+    if eval_tokens is not None:
+        if eval_batch_size < 1 or eval_seq_len < 2 or eval_batches < 1:
+            raise ValueError("Evaluation batch size, sequence length and batch count must be valid.")
+        if eval_seq_len > config.max_context:
+            raise ValueError("Evaluation sequence length exceeds the model's max_context.")
+        if eval_mask is not None and not Path(eval_mask).is_file():
+            raise FileNotFoundError(f"Evaluation mask not found: {eval_mask}")
+        if not Path(eval_tokens).is_file():
+            raise FileNotFoundError(f"Evaluation token stream not found: {eval_tokens}")
+
+        # Keep INT8 activation fake quantization fixed across candidates. Only
+        # the matrix weights differ; model's Q2 STE must not re-quantize them.
+        import qmini.model as model_module
+        from qmini.model import QMiniMoE
+        from qmini.evaluate import evaluate_language_model
+
+        original_q2_fake_quantizer = model_module.quantize_quaternary
+        model_module.quantize_quaternary = lambda weight: weight
+        heldout_evaluation = {}
+        try:
+            for format_name in formats:
+                candidate = QMiniMoE(config)
+                candidate.load_state_dict(quality_states[format_name], strict=True)
+                candidate.to(torch.device(eval_device)).eval()
+                result = evaluate_language_model(
+                    candidate,
+                    eval_tokens,
+                    mask_path=eval_mask,
+                    batch_size=eval_batch_size,
+                    seq_len=eval_seq_len,
+                    batches=eval_batches,
+                    seed=eval_seed,
+                )
+                heldout_evaluation[format_name] = {
+                    "cross_entropy": result["cross_entropy"],
+                    "perplexity": result["perplexity"],
+                    "supervised_target_tokens": result["supervised_target_tokens"],
+                    "elapsed_seconds": result["elapsed_seconds"],
+                    "input_tokens_per_second": result["input_tokens_per_second"],
+                    "seed": eval_seed,
+                    "batch_size": eval_batch_size,
+                    "sequence_length": eval_seq_len,
+                    "batches": eval_batches,
+                    "device": str(eval_device),
+                    "activation_path": "INT8 fake quantization held constant",
+                }
+                del candidate
+                if str(eval_device).startswith("cuda") and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        finally:
+            model_module.quantize_quaternary = original_q2_fake_quantizer
+
     report = {
-        "format": "qmini-weight-quantization-ablation-v1",
+        "format": "qmini-weight-quantization-ablation-v2",
         "source_model_dir": str(source_path.resolve()),
         "source_weight_path": str(weight_path.resolve()),
         "source_kind": source_kind,
@@ -206,6 +278,15 @@ def run_ablation(
         "matrix_tensor_count": matrix_count,
         "vector_tensor_count": vector_count,
         "group_size": group_size,
+        "heldout_language_evaluation": heldout_evaluation,
+        "evaluation_dataset_sha256": (
+            hashlib.sha256(Path(eval_tokens).read_bytes()).hexdigest()
+            if eval_tokens is not None else None
+        ),
+        "evaluation_mask_sha256": (
+            hashlib.sha256(Path(eval_mask).read_bytes()).hexdigest()
+            if eval_mask is not None else None
+        ),
         "formats": {
             name: {
                 **_finish_metrics(totals[name]),
@@ -215,8 +296,8 @@ def run_ablation(
         },
         "tensor_results": per_tensor,
         "limitations": [
-            "This report measures weight reconstruction error only.",
-            "It does not measure validation NLL, assistant quality, runtime speed or peak RSS.",
+            "Weight reconstruction metrics are always reported; held-out NLL/perplexity are reported only when --eval-tokens is supplied.",
+            "Held-out language-model loss is not a semantic assistant-quality score and does not measure task-level capability.",
             "All formats are experimental; this script does not change the model's default quantizer.",
             "Only Q-Mini-owned final_model/model.pt or its own latest.pt training checkpoint is accepted; no external pretrained weights are loaded.",
         ],
@@ -243,6 +324,13 @@ def main() -> int:
     source.add_argument("--checkpoint", help="Q-Mini-owned latest.pt training checkpoint")
     parser.add_argument("--output", default="quantization-ablation.json")
     parser.add_argument("--group-size", type=int, default=64)
+    parser.add_argument("--eval-tokens", default=None, help="optional held-out uint16 token stream for NLL/perplexity")
+    parser.add_argument("--eval-mask", default=None, help="optional aligned uint8 loss mask")
+    parser.add_argument("--eval-batch-size", type=int, default=2)
+    parser.add_argument("--eval-seq-len", type=int, default=128)
+    parser.add_argument("--eval-batches", type=int, default=100)
+    parser.add_argument("--eval-seed", type=int, default=42)
+    parser.add_argument("--eval-device", default="cpu")
     args = parser.parse_args()
     if args.group_size < 1:
         parser.error("--group-size must be positive.")
@@ -255,6 +343,13 @@ def main() -> int:
         model_source,
         Path(args.output).expanduser(),
         args.group_size,
+        eval_tokens=Path(args.eval_tokens).expanduser() if args.eval_tokens else None,
+        eval_mask=Path(args.eval_mask).expanduser() if args.eval_mask else None,
+        eval_batch_size=args.eval_batch_size,
+        eval_seq_len=args.eval_seq_len,
+        eval_batches=args.eval_batches,
+        eval_seed=args.eval_seed,
+        eval_device=args.eval_device,
     )
     for name, result in report["formats"].items():
         print(
@@ -262,6 +357,12 @@ def main() -> int:
             f"cosine={result['cosine_similarity']:.6f} "
             f"bytes={result['estimated_weight_payload_bytes']:,}"
         )
+    if report.get("heldout_language_evaluation"):
+        for name, result in report["heldout_language_evaluation"].items():
+            print(
+                f"{name} heldout_nll={result['cross_entropy']:.6f} "
+                f"ppl={result['perplexity']}"
+            )
     print(f"Report saved: {Path(args.output).expanduser()}")
     return 0
 
