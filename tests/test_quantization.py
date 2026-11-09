@@ -100,6 +100,16 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
     torch.save(model.state_dict(), model_dir / "model.pt")
     packed_archive = model_dir / "model.qmini.npz"
     export_packed_state(model.state_dict(), config, packed_archive)
+    (model_dir / "model_manifest.json").write_text(
+        json.dumps({
+            "format": "qmini-final-model-v2",
+            "config": config.to_dict(),
+            "parameters": model.parameter_report()["total"],
+            "packed_export": packed_archive.name,
+            "packed_export_bytes": packed_archive.stat().st_size,
+        }),
+        encoding="utf-8",
+    )
 
     tokens_path = tmp_path / "heldout.bin"
     rng = np.random.default_rng(603)
@@ -305,3 +315,21 @@ def test_quantization_component_classifier_and_scale_distribution_summary():
     assert summary["p95"] == pytest.approx(2.85)
     assert summary["max"] == 3.0
     assert summary["mean"] == pytest.approx(1.5)
+
+
+
+def test_quantization_ablation_rejects_unmanifested_fp16_reference(
+    tiny_config, tmp_path
+):
+    from qmini.config import QMiniConfig
+    from qmini.model import QMiniMoE
+    from qmini.quantization_ablation import run_ablation
+
+    config = QMiniConfig.from_dict(tiny_config.to_dict())
+    model_dir = tmp_path / "unverified-final-model"
+    model_dir.mkdir()
+    config.save(model_dir / "config.json")
+    torch.save(QMiniMoE(config).state_dict(), model_dir / "model.pt")
+
+    with pytest.raises(FileNotFoundError, match="model_manifest.json provenance"):
+        run_ablation(model_dir, tmp_path / "report.json", group_size=8)
