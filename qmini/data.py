@@ -100,10 +100,13 @@ def _iter_plain(path: Path, chunk_chars: int = 8192) -> Iterator[str]:
 
 def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[object]:
     """Incrementally decode a top-level JSON array with bounded input buffering."""
+    opening = handle.read(1)
+    if opening != "[":
+        raise ValueError(f"Expected a top-level JSON array in {path}.")
     decoder = json.JSONDecoder()
-    buffer = ""
+    buffer = handle.read(chunk_chars)
     cursor = 0
-    eof = False
+    eof = len(buffer) == 0
     expect_value = True
 
     while True:
