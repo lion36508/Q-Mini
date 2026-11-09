@@ -317,7 +317,7 @@ Q-Mini does not update its neural weights autonomously during chat. Optional SQL
 
 ## 16. 4GB-device planning versus measured support
 
-The 5B configuration is **5,132,630,288 total parameters** with **852,873,488 unique Top-1 active parameters per token**. A single-expert dense reference, \`configs/qmini_dense_853m.json\`, has **852,350,993 parameters**, giving a comparable active-parameter reference for controlled quality/latency comparisons. This does not prove that sparse MoE is better; both profiles need the same data, compute budget and held-out evaluation.
+The 5B configuration is **5,132,630,288 total parameters** with **852,873,488 unique Top-1 active parameters per token**. A single-expert dense reference, \`configs/qmini_dense_853m.json\`, has **852,281,344 parameters**, giving a comparable active-parameter reference for controlled quality/latency comparisons. This does not prove that sparse MoE is better; both profiles need the same data, compute budget and held-out evaluation.
 
 The current plan estimates:
 - Packed 5B model-weight artifact: **1,294,831,200 bytes**.
