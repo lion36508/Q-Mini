@@ -119,6 +119,8 @@ jobs:
                   )
               if report["seed"] != 42:
                   raise SystemExit(f"{filename} did not use the fixed benchmark seed.")
+              if not report["cpu_model"].strip() or report["cpu_model"].strip().isdigit():
+                  raise SystemExit(f"{filename} did not identify the CPU model.")
               if report["prefill_input_tokens_per_second"] <= 0:
                   raise SystemExit("Prefill throughput is invalid.")
               if report["decode_tokens_per_second"] <= 0:
