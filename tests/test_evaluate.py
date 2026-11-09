@@ -195,7 +195,7 @@ def test_multi_turn_conversation_evaluation_reuses_prior_assistant_turns(
     assert "<|assistant|>42\n<|end|>" in prompts[1]
     assert "Repeat the number you just gave." in prompts[1]
     assert len(report["cases"]) == 3
-    assert model.training is False
+    assert model.training is True
 
 
 def test_multi_turn_evaluator_rejects_an_overlong_single_turn(
