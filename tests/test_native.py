@@ -96,6 +96,7 @@ def test_qlinear_uses_native_kernel_and_invalidates_packed_cache(
 
     kernel.linear = counted_linear
     monkeypatch.setattr(native_module, "get_native_kernel", lambda: kernel)
+    monkeypatch.setenv("QMINI_NATIVE_FORCE_SCALAR", "1")
 
     layer = QLinear(7, 5).eval()
     values = torch.randn(2, 3, 7, dtype=torch.float32)
@@ -135,6 +136,7 @@ def test_tied_embedding_output_uses_native_projection(
 
     kernel = NativeKernel(compiled_native_library)
     monkeypatch.setattr(native_module, "get_native_kernel", lambda: kernel)
+    monkeypatch.setenv("QMINI_NATIVE_FORCE_SCALAR", "1")
     embedding = QEmbedding(37, 9).eval()
     hidden = torch.randn(2, 4, 9)
     with torch.inference_mode():
@@ -227,3 +229,43 @@ def test_outdated_native_library_fails_with_rebuild_instruction(tmp_path):
     )
     with pytest.raises(RuntimeError, match="Native library is outdated"):
         NativeKernel(old_library)
+
+
+def test_scalar_native_kernel_is_opt_in_on_non_neon_platform(
+    compiled_native_library, monkeypatch
+):
+    import qmini.native as native_module
+    from qmini.model import QLinear
+
+    kernel = NativeKernel(compiled_native_library)
+    if kernel.uses_neon:
+        pytest.skip("NEON is a default-supported native backend.")
+    monkeypatch.setattr(native_module, "get_native_kernel", lambda: kernel)
+    monkeypatch.delenv("QMINI_NATIVE_FORCE_SCALAR", raising=False)
+
+    layer = QLinear(7, 5).eval()
+    values = torch.randn(2, 3, 7, dtype=torch.float32)
+    with torch.inference_mode():
+        output = layer(values)
+    assert torch.isfinite(output).all()
+    assert not hasattr(layer, "_qmini_native_packed_weight")
+    assert native_module.native_kernel_should_be_used(kernel) is False
+
+    monkeypatch.setenv("QMINI_NATIVE_FORCE_SCALAR", "1")
+    with torch.inference_mode():
+        output_forced = layer(values)
+    assert torch.allclose(output_forced, output, atol=2e-5, rtol=2e-5)
+    assert hasattr(layer, "_qmini_native_packed_weight")
+    assert native_module.native_kernel_should_be_used(kernel) is True
+
+
+def test_neon_native_kernel_is_selected_without_force_flag(
+    compiled_native_library, monkeypatch
+):
+    import qmini.native as native_module
+
+    kernel = NativeKernel(compiled_native_library)
+    if not kernel.uses_neon:
+        pytest.skip("This runner has no NEON backend.")
+    monkeypatch.delenv("QMINI_NATIVE_FORCE_SCALAR", raising=False)
+    assert native_module.native_kernel_should_be_used(kernel) is True
