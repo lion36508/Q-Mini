@@ -123,11 +123,11 @@ def _sample_batch(
     return x, y, loss_mask
 
 
-def _masked_cross_entropy(
+def _masked_cross_entropy_sum(
     logits: torch.Tensor,
     targets: torch.Tensor,
     target_mask: torch.Tensor,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     per_token = F.cross_entropy(
         logits.float().reshape(-1, logits.shape[-1]),
         targets.reshape(-1),
@@ -137,7 +137,16 @@ def _masked_cross_entropy(
     denominator = weights.sum()
     if not bool(denominator > 0):
         raise ValueError("A sampled batch contains no supervised target tokens.")
-    return (per_token * weights).sum() / denominator
+    return (per_token * weights).sum(), denominator
+
+
+def _masked_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    target_mask: torch.Tensor,
+) -> torch.Tensor:
+    numerator, denominator = _masked_cross_entropy_sum(logits, targets, target_mask)
+    return numerator / denominator
 
 
 def _evaluate(
@@ -296,6 +305,7 @@ def _resume_contract(
     learning_rate: float,
     weight_decay: float,
     seed: int,
+    initial_model_path: str | Path | None = None,
 ) -> dict[str, Any]:
     train_file = Path(train_path).resolve()
     valid_file = Path(valid_path).resolve()
@@ -319,6 +329,14 @@ def _resume_contract(
         "learning_rate": float(learning_rate),
         "weight_decay": float(weight_decay),
         "seed": int(seed),
+        "initial_model": (
+            _sha256_file(initial_model_path)
+            if initial_model_path is not None else None
+        ),
+        "initial_model_path": (
+            str(Path(initial_model_path).resolve())
+            if initial_model_path is not None else None
+        ),
     }
 
 
@@ -374,6 +392,7 @@ def train_model(
     allow_legacy_resume: bool = False,
     train_mask_bin: str | Path | None = None,
     valid_mask_bin: str | Path | None = None,
+    init_from: str | Path | None = None,
 ) -> Path:
     """Train from scratch or resume only when data and optimization settings match."""
     config.validate()
@@ -398,6 +417,22 @@ def train_model(
 
     if (train_mask_bin is None) != (valid_mask_bin is None):
         raise ValueError("Provide both --train-mask-bin and --valid-mask-bin, or neither.")
+    if resume and init_from is not None:
+        raise ValueError("--resume and --init-from are mutually exclusive.")
+    initial_model_path = Path(init_from).expanduser().resolve() if init_from is not None else None
+    if resume and initial_model_path is None:
+        previous_run_path = Path(output_dir).expanduser() / "run.json"
+        if previous_run_path.is_file():
+            try:
+                with previous_run_path.open("r", encoding="utf-8") as handle:
+                    previous_run = json.load(handle)
+                previous_initial = previous_run.get("initial_model")
+                if previous_initial and previous_initial.get("path"):
+                    initial_model_path = Path(previous_initial["path"]).expanduser().resolve()
+            except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                raise ValueError(f"Could not recover the fine-tuning source from {previous_run_path}.")
+    if initial_model_path is not None and not initial_model_path.is_file():
+        raise FileNotFoundError(f"Initial model weights not found: {initial_model_path}")
     train_tokens = _load_tokens(train_bin, "Training")
     valid_tokens = _load_tokens(valid_bin, "Validation")
     _verify_prepared_dataset_manifest(
@@ -418,6 +453,7 @@ def train_model(
     contract = _resume_contract(
         train_bin, valid_bin, tokenizer_path, train_mask_bin, valid_mask_bin,
         batch_size, seq_len, grad_accum, learning_rate, weight_decay, actual_seed,
+        initial_model_path,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -448,6 +484,22 @@ def train_model(
         betas=(0.9, 0.95),
         weight_decay=weight_decay,
     )
+    if initial_model_path is not None and not resume:
+        try:
+            initial_state = torch.load(
+                initial_model_path, map_location=device, weights_only=True
+            )
+        except TypeError:
+            initial_state = torch.load(initial_model_path, map_location=device)
+        if not isinstance(initial_state, dict) or "format" in initial_state or "model" in initial_state:
+            raise ValueError(
+                "--init-from must point to final_model/model.pt, not a training checkpoint."
+            )
+        model.load_state_dict(initial_state, strict=True)
+        print(
+            f"Initialized model weights from {initial_model_path}; "
+            "the fine-tuning stage starts with a fresh optimizer."
+        )
     use_amp = device.type == "cuda"
     bf16_supported = (
         bool(torch.cuda.is_bf16_supported())
@@ -493,10 +545,15 @@ def train_model(
                 RuntimeWarning,
             )
         elif saved_contract != contract:
-            raise ValueError(
-                "Resume contract mismatch (dataset/tokenizer fingerprint or optimizer settings). "
-                "Use a new run directory for changed data or settings."
-            )
+            legacy_contract = {
+                key: value for key, value in contract.items()
+                if key not in {"initial_model", "initial_model_path"}
+            }
+            if saved_contract != legacy_contract:
+                raise ValueError(
+                    "Resume contract mismatch (dataset/tokenizer, initial weights or optimizer "
+                    "settings). Use a new run directory for changed data or settings."
+                )
 
         model.load_state_dict(state["model"], strict=True)
         optimizer.load_state_dict(state["optimizer"])
@@ -534,8 +591,18 @@ def train_model(
             f"Resuming from step {start_step:,}; schedule horizon={schedule_total_steps:,}."
         )
 
+    initial_model_record = None
+    if initial_model_path is not None:
+        fingerprint = _sha256_file(initial_model_path)
+        initial_model_record = {
+            "path": str(initial_model_path),
+            "sha256": fingerprint["sha256"],
+            "size_bytes": fingerprint["size_bytes"],
+        }
+
     run_manifest = {
         "format": "qmini-run-manifest-v1",
+        "initial_model": initial_model_record,
         "model_config": config.to_dict(),
         "resume_contract": contract,
         "schedule_total_steps": schedule_total_steps,
@@ -572,10 +639,20 @@ def train_model(
         sampled_thinking_steps = random.randint(1, config.max_thinking_steps)
         router_counts_total: list[torch.Tensor] | None = None
 
-        for _micro_step in range(grad_accum):
-            x, y, target_mask = _sample_batch(
-                train_tokens, train_masks, batch_size, seq_len, rng, device
-            )
+        # Weight assistant-response loss by supervised target count over the
+        # complete optimizer batch, not by an unweighted mean of microbatches.
+        microbatches = [
+            _sample_batch(train_tokens, train_masks, batch_size, seq_len, rng, device)
+            for _ in range(grad_accum)
+        ]
+        total_supervised_targets = sum(
+            float(target_mask.sum().item())
+            for _inputs, _targets, target_mask in microbatches
+        )
+        if total_supervised_targets <= 0:
+            raise ValueError("An optimizer batch contains no supervised target tokens.")
+
+        for x, y, target_mask in microbatches:
             amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
             amp_context = (
                 torch.autocast(device_type="cuda", dtype=amp_dtype)
@@ -583,24 +660,24 @@ def train_model(
             )
             with amp_context:
                 result = model(x, thinking_steps=sampled_thinking_steps)
-                cross_entropy = _masked_cross_entropy(
+                cross_entropy_sum, _ = _masked_cross_entropy_sum(
                     result["logits"], y, target_mask
                 )
+                cross_entropy = cross_entropy_sum / total_supervised_targets
                 auxiliary = result["aux_loss"].float()
-                loss = cross_entropy + config.router_aux_loss_coef * auxiliary
+                loss = cross_entropy + config.router_aux_loss_coef * auxiliary / grad_accum
 
             if not torch.isfinite(loss):
                 raise FloatingPointError(
                     f"Non-finite loss at optimizer step {step + 1}; checkpoint is unchanged."
                 )
-            scaled_loss = loss / grad_accum
             if use_fp16:
-                scaler.scale(scaled_loss).backward()
+                scaler.scale(loss).backward()
             else:
-                scaled_loss.backward()
+                loss.backward()
 
-            accum["loss"] += float(loss.detach()) / grad_accum
-            accum["ce"] += float(cross_entropy.detach()) / grad_accum
+            accum["loss"] += float(loss.detach())
+            accum["ce"] += float(cross_entropy.detach())
             accum["aux"] += float(auxiliary.detach()) / grad_accum
             accum["targets"] += float(target_mask.sum().detach())
             batch_counts = [
