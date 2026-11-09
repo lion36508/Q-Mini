@@ -62,6 +62,7 @@ def run_ablation(
     eval_batches: int = 100,
     eval_seed: int = 42,
     eval_device: str = "cpu",
+    max_eval_parameters: int = 10_000_000,
 ) -> dict[str, Any]:
     """Compare formats using a Q-Mini final snapshot or own training checkpoint."""
     source_path = Path(model_dir).expanduser()
@@ -217,6 +218,15 @@ def run_ablation(
 
     heldout_evaluation = None
     if eval_tokens is not None:
+        if isinstance(max_eval_parameters, bool) or max_eval_parameters < 1:
+            raise ValueError("max_eval_parameters must be a positive integer.")
+        if config.estimated_parameter_count() > max_eval_parameters:
+            raise ValueError(
+                f"Held-out quantization evaluation is capped at {max_eval_parameters:,} "
+                f"parameters to bound the five candidate state copies; this model has "
+                f"{config.estimated_parameter_count():,}. Raise --max-eval-parameters "
+                "only when sufficient host RAM is available."
+            )
         if eval_batch_size < 1 or eval_seq_len < 2 or eval_batches < 1:
             raise ValueError("Evaluation batch size, sequence length and batch count must be valid.")
         if eval_seq_len > config.max_context:
@@ -331,6 +341,7 @@ def main() -> int:
     parser.add_argument("--eval-batches", type=int, default=100)
     parser.add_argument("--eval-seed", type=int, default=42)
     parser.add_argument("--eval-device", default="cpu")
+    parser.add_argument("--max-eval-parameters", type=int, default=10_000_000)
     args = parser.parse_args()
     if args.group_size < 1:
         parser.error("--group-size must be positive.")
@@ -350,6 +361,7 @@ def main() -> int:
         eval_batches=args.eval_batches,
         eval_seed=args.eval_seed,
         eval_device=args.eval_device,
+        max_eval_parameters=args.max_eval_parameters,
     )
     for name, result in report["formats"].items():
         print(
