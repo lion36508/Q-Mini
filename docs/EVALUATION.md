@@ -71,3 +71,8 @@ For the 5B design, compare the sparse profile against \`configs/qmini_dense_853m
 - Prefill throughput, autoregressive decode latency/tokens/sec, peak process RSS, cold start and thermal behavior.
 
 The planner's 1.409 GB CPU working-set estimate for batch 1 is not a measured process RSS and does not establish a 4 GB-phone target. A release claim requires measurements on the actual device with the trained packed archive and tokenizer loaded.
+
+
+## Metric aggregation
+
+Report token-weighted negative log-likelihood, not an arithmetic mean of batch-level means. For masked conversation data, sum each supervised response token's cross-entropy and divide by the total supervised response-token count across the entire evaluation stream. Log that count alongside validation loss and perplexity. The periodic training evaluator and standalone \`eval-lm\` use this same definition.
