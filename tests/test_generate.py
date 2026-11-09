@@ -144,3 +144,23 @@ def test_prepare_chat_prompt_rejects_a_user_message_larger_than_context(
             counter,
             max_context=8,
         )
+
+
+
+def test_legacy_chat_history_trimming_preserves_system_prefix():
+    counter = _RoleAwareTokenCounter()
+    system = "[SYSTEM]\nAlways answer with the provided context.\n\n"
+    turns = [
+        "[USER]\nold question\n[ASSISTANT]\nold reply\n",
+        "[USER]\nlatest question\n[ASSISTANT]\nlatest reply\n",
+    ]
+    history = system + "".join(turns)
+    expected = system + turns[-1]
+    budget = len(counter.encode(expected).ids)
+    trimmed = trim_chat_history(
+        history, counter, token_budget=budget, has_control_tokens=False
+    )
+    assert trimmed == expected
+    assert trimmed.startswith("[SYSTEM]\n")
+    assert trimmed.count("[USER]") == 1
+    assert trimmed.count("[ASSISTANT]") == 1
