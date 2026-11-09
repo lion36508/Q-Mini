@@ -166,6 +166,13 @@ def run_ablation(
         packed_path = config_path.parent / packed_name
         if not packed_path.is_file() or packed_path.stat().st_size != packed_bytes:
             raise ValueError("Final model manifest packed-export size/path fingerprint is invalid.")
+        if manifest.get("packed_export_sha256") != _sha256_path(packed_path):
+            raise ValueError("Final model manifest packed-export SHA-256 does not match the archive.")
+        dense_snapshot_bytes = manifest.get("dense_snapshot_bytes")
+        if dense_snapshot_bytes != weight_path.stat().st_size:
+            raise ValueError("Final model manifest dense snapshot byte count does not match model.pt.")
+        if manifest.get("dense_snapshot_sha256") != _sha256_path(weight_path):
+            raise ValueError("Final model manifest dense snapshot SHA-256 does not match model.pt.")
         state = loaded
         source_kind = "qmini-final-model-state-dict"
 
