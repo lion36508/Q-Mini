@@ -67,8 +67,17 @@ The 5B FP32 parameter, gradient and two AdamW moment arrays require about 82.1 G
 
 ## 5B deployment footprint and CPU runtime
 
-For \`configs/qmini_5b.json\` (5,132,630,288 parameters), the row-padded Q2 weight payload, FP32 row scales, FP16 vectors and a metadata reserve are estimated at **1,294,691,936 bytes** (about 1.295 GB decimal / 1.206 GiB). This is below the 1,500,000,000-byte model-weight artifact budget. The estimate is based on exact tensor shapes, not a measured trained checkpoint; tokenizer and application files are separate.
+For \`configs/qmini_5b.json\` (5,132,630,288 parameters), the row-padded Q2 weight payload, FP32 row scales, FP16 vectors and a metadata reserve are estimated at **1,294,831,200 bytes** (about 1.295 GB decimal / 1.206 GiB). This is below the 1,500,000,000-byte model-weight artifact budget. The estimate is based on exact tensor shapes, not a measured trained checkpoint; tokenizer and application files are separate.
 
 Large training runs keep the resumable \`latest.pt\` checkpoint in the run directory. The final deployment folder omits the redundant dense FP32 \`model.pt\` when it would exceed 256 MiB and retains \`model.qmini.npz\`, configuration and tokenizer. \`qmini generate\` and \`qmini chat\` prefer the packed CPU runtime automatically. A packed archive can be supplied to \`--init-from\` for a later training stage; it is dequantized one tensor at a time into the separately allocated trainable model.
 
 Run \`python -m qmini.cli plan --config configs/qmini_5b.json\` to inspect the estimated artifact size. Run \`python -m qmini.cli verify-export --path final_model/model.qmini.npz\` to validate an archive without expanding the complete FP32 state. CPU compatibility is implemented, but speed on any specific handset is not claimed until benchmarked on that device.
+
+
+## 5B sparse-versus-dense compute reference and RAM estimate
+
+The sparse configuration has 5,132,630,288 total parameters, 852,873,488 unique Top-1 active parameters per token and 16 experts per block. All experts' packed weights must remain present in the model artifact, even though only one expert is selected for each token in a given block.
+
+\`configs/qmini_dense_853m.json\` is a single-expert dense reference with 852,350,993 parameters. It is close to the sparse profile's unique active parameter count, but it is not yet a scientifically controlled comparison: both variants must be trained on the same corpus, tokenizer, tokens seen, schedule and random seeds, then compared on the same held-out tasks and hardware.
+
+For batch 1 with the maximum configured thinking passes, the config planner estimates 80,560,128 bytes of persistent convolution/SSM/rolling-token state, and 1,409,117,792 bytes for packed weights + those caches + simplified activation/fallback buffers. This is an engineering estimate, not measured process RSS. Python/PyTorch runtime memory, allocator fragmentation, OS usage, tokenizer storage and archive decompression overlap are excluded. A 4 GB physical-RAM deployment claim must wait for measured peak RSS on the target handset.
