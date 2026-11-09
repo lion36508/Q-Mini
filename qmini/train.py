@@ -6,6 +6,7 @@ import math
 import os
 import random
 import shutil
+import time
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
@@ -246,6 +247,7 @@ def _evaluate(
     rng = np.random.default_rng(seed)
     total_negative_log_likelihood = 0.0
     total_supervised_targets = 0.0
+    evaluation_started = time.perf_counter()
     try:
         with torch.inference_mode():
             for _ in range(batches):
@@ -258,6 +260,10 @@ def _evaluate(
                     if thinking_steps is None
                     else model(x, thinking_steps=thinking_steps)
                 )
+                if not torch.isfinite(result["logits"]).all():
+                    raise FloatingPointError(
+                        f"Non-finite logits at thinking_steps={thinking_steps!r}."
+                    )
                 nll_sum, target_count = _masked_cross_entropy_sum(
                     result["logits"], y, target_mask
                 )
@@ -272,10 +278,15 @@ def _evaluate(
         raise ValueError("Validation run contains no supervised target tokens.")
     mean_loss = total_negative_log_likelihood / total_supervised_targets
     perplexity = math.exp(mean_loss) if mean_loss < 709.0 else None
+    evaluation_elapsed = max(time.perf_counter() - evaluation_started, 1e-9)
     return {
         "eval_loss": mean_loss,
         "eval_perplexity": perplexity,
         "eval_supervised_tokens": int(total_supervised_targets),
+        "eval_elapsed_seconds": float(evaluation_elapsed),
+        "eval_supervised_tokens_per_second": float(
+            total_supervised_targets / evaluation_elapsed
+        ),
         "eval_thinking_steps": (
             int(thinking_steps) if thinking_steps is not None
             else int(model.config.thinking_steps)
