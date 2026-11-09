@@ -148,3 +148,52 @@ Issues #8, #19, #25, #26, #27, #28 and #29 were closed only after this passing r
 ## Audit conclusion
 
 Q-Mini has a credible experimental code foundation and is not “useless code.” It needs targeted correctness fixes, numerical/quality ablations, stronger evaluation and a genuinely scalable training/runtime path before it can be described as a powerful general assistant. Keep the from-scratch random initialization requirement unchanged. Make every improvement test-backed, benchmarked and traceable to an issue.
+## 7. Follow-up audit and CI evidence — 2026-11-09 15:56 UTC
+
+This follow-up supersedes the earlier "not executed" test limitation above for the exact revisions and checks listed here. It does not convert a static audit into proof that every possible defect has been found.
+
+### Latest verified revision
+
+- `main`: `90d2c4ddbf886a0ce47318621e22a623e4622a45`
+- CI run [#358](https://github.com/lion36508/Q-Mini/actions/runs/42649249377): completed successfully.
+- Test result: **170 passed, 3 skipped**.
+- Skips: two CUDA-only numerical tests because the CI runner has no CUDA GPU, and one runtime NEON test because the runner is x86_64. The ARM64 NEON shared library was separately cross-compiled successfully.
+- Also passed: Python syntax validation for all eight Colab code cells, C++ scalar kernel build, ARM64 cross-compile, package wheel install/native-kernel check, reproducible CPU native/fallback benchmarks, tiny random-initialized checkpoint training and packed decode, quantization and structured-conversation smoke evaluation, audit and CLI checks.
+- CI run [#356](https://github.com/lion36508/Q-Mini/actions/runs/42648154487) on the action-upgrade commit also passed: 167 tests passed, 3 skipped.
+
+### Recent failed-run review
+
+The 100 most recent GitHub Actions runs were inspected. Eleven had `conclusion=failure`; cancelled runs were counted separately and not misclassified as test failures. The failures fell into these groups:
+
+- `#298`, `#305`, `#314`, `#321`, `#322`: chat-history trimming/context-limit behavior, evaluation handling when earlier turns are evicted, and old test assumptions about message-boundary formatting. Current test coverage exercises the repaired whole-turn trimming path.
+- `#313`: a quantization ablation metric became non-finite on a zero/near-zero reference tensor. The current suite includes quantization edge-case tests and passes.
+- `#325`, `#326`, `#340`: missing imports in the quantization/ablation test or diagnostic path (`numpy`/`json`). These were fixed and covered by later CI.
+- `#345`: quantization manifest/config normalization caused three manifest-validation tests to fail. The config normalization and regression assertions were repaired in later commits.
+- `#351`: one Colab notebook test compared a literal escaped newline rather than checking the two code fragments separately. The test assertion was corrected in a later commit.
+
+The current full suite passing is evidence that the checked-in regressions have been repaired; it is not evidence that every runtime combination or dataset has been tested. Runs `#354`, `#355`, and `#357` were cancelled during overlapping branch updates under the workflow's `cancel-in-progress` concurrency policy; they are not additional failing test runs.
+
+### Changes made in this follow-up
+
+1. CI actions upgraded to Node-24-compatible majors (`checkout@v7`, `setup-python@v7`, `upload-artifact@v7`). Issue #32 was closed after run #356 passed.
+2. `train_model(..., init_from=...)` now requires a Q-Mini `final_model/` manifest and matching `config.json`; verifies the recorded architecture and parameter count; verifies the Q2 packed archive fingerprint and contents; verifies the selected dense snapshot hash/size or that the selected `.npz` is exactly the manifest-listed packed export; and checks the source tokenizer hash when a tokenizer is supplied.
+3. Standalone `.pt`/`.npz` weight files without Q-Mini final-model provenance are rejected for SFT initialization. Regression tests cover valid own-checkpoint dense and packed SFT initialization, orphan/external artifacts, tampered packed artifacts and malformed non-object manifests.
+
+This provenance contract binds the model files together and reduces accidental use of third-party weights. It is not a digital signature and cannot prove the identity of the person who created a deliberately forged manifest. Do not treat files from an untrusted publisher as authenticated.
+
+### Remaining open engineering blockers
+
+These are incomplete features or evidence gaps, not presently demonstrated unit-test failures:
+
+- **#34 (P0 data):** source/license provenance, release-mode license gates, data quality/language/source concentration reports and PII/secrets screening are not complete. The repository does exact and optional near-duplicate grouping and deterministic document-level train/validation splitting, but that is not a complete data governance system.
+- **#17, #36:** staged long-run Colab training, robust cloud artifact storage and cost/interrupt recovery still need an end-to-end interrupted-run demonstration.
+- **#18, #33:** real FSDP/ZeRO sharded training and sharded resume are not implemented. `qmini.distributed` currently supplies planning and environment preflight only.
+- **#21, #35:** the SFT source is now restricted to Q-Mini-owned artifacts, but a reproducible full pretrain-to-SFT curriculum and measured held-out capability improvement have not yet been demonstrated.
+- **#20:** CUDA BF16/FP16 and long-sequence stress tests remain unverified on actual GPU hardware; CPU CI cannot substitute for them.
+- **#22:** Q2-v2 format consistency is tested, but quality preservation must still be measured on a genuinely trained Q-Mini checkpoint and larger independent holdouts.
+- **#23:** semantic correctness, factuality, robust multilingual performance and constrained code execution are not established by current lexical/numeric/JSON smoke evaluators.
+- **#12, #13:** the actual 5B target and 4GB-phone runtime are not built/proven; the optional random-initialized Mamba-2/SSD comparison has not been completed. Neither should be described as a current capability.
+
+### Scope and limitations
+
+No large-scale pretraining or SFT was started in this audit. No external pretrained weights were downloaded or loaded. No user dataset was available for license, privacy, language-balance or leakage audit. No CUDA GPU or physical ARM phone was benchmarked. The three CI skips are therefore still real coverage gaps. The current verified result is a passing CPU CI suite and improved checkpoint provenance—not a claim that Q-Mini is already a capable general-purpose assistant or that every open roadmap issue is resolved.
