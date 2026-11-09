@@ -5,6 +5,7 @@ from qmini.quantization import (
     fake_quantize_int8, pack_quaternary, pack_ternary,
     pack_int4_groupwise, quantization_error_metrics,
     quantize_quaternary, quantize_ternary_rowwise,
+    quantize_int8_rowwise, dequantize_int8_rowwise,
     unpack_quaternary, unpack_ternary, unpack_int4_groupwise,
 )
 
@@ -100,7 +101,7 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
     report = run_ablation(model_dir, output, group_size=8)
     assert output.is_file()
     assert report["source_parameter_count"] == model.parameter_report()["total"]
-    assert set(report["formats"]) == {"fp16", "q2", "ternary", "int4"}
+    assert set(report["formats"]) == {"fp16", "int8", "q2", "ternary", "int4"}
     for metrics in report["formats"].values():
         assert np.isfinite(metrics["relative_l2_error"])
         assert np.isfinite(metrics["cosine_similarity"])
@@ -135,3 +136,30 @@ def test_quantization_ablation_accepts_qmini_owned_latest_checkpoint(
     assert report["source_kind"] == "qmini-training-checkpoint"
     assert report["source_weight_path"] == str(checkpoint_path.resolve())
     assert report["source_parameter_count"] == model.parameter_report()["total"]
+
+
+def test_rowwise_int8_weight_quantization_round_trip_and_zero_rows():
+    weight = torch.tensor([
+        [0.0, 0.0, 0.0, 0.0],
+        [-1.0, -0.25, 0.5, 2.0],
+        [0.01, -0.02, 0.03, -0.04],
+    ])
+    quantized, scales = quantize_int8_rowwise(weight)
+    assert quantized.dtype == torch.int8
+    assert scales.dtype == torch.float32
+    assert scales.shape == (3,)
+    assert torch.all(quantized[0] == 0)
+    restored = dequantize_int8_rowwise(quantized, scales)
+    assert restored.shape == weight.shape
+    assert torch.equal(restored[0], torch.zeros_like(restored[0]))
+    assert (restored - weight).abs().max() <= scales.max() / 2 + 1e-6
+
+
+def test_rowwise_int8_quantization_rejects_invalid_weights_and_scales():
+    with pytest.raises(ValueError, match="non-finite"):
+        quantize_int8_rowwise(torch.tensor([[float("nan"), 1.0]]))
+    q = torch.zeros((2, 3), dtype=torch.int8)
+    with pytest.raises(TypeError, match="float32 vector"):
+        dequantize_int8_rowwise(q, torch.ones(2, dtype=torch.float16))
+    with pytest.raises(ValueError, match="finite and positive"):
+        dequantize_int8_rowwise(q, torch.tensor([1.0, float("nan")]))
