@@ -663,15 +663,45 @@ def train_model(
         "save_every": save_every,
         "eval_batches": eval_batches,
     }
+    invalid_types = [
+        name for name, value in positive.items()
+        if isinstance(value, bool) or not isinstance(value, int)
+    ]
+    if invalid_types:
+        raise TypeError(
+            "These training settings must be integers: " + ", ".join(invalid_types)
+        )
     invalid = [name for name, value in positive.items() if value < 1]
     if invalid:
         raise ValueError("These training settings must be positive: " + ", ".join(invalid))
     if not 2 <= seq_len <= config.max_context:
         raise ValueError(f"seq_len must be between 2 and {config.max_context}.")
-    if not math.isfinite(learning_rate) or learning_rate <= 0:
-        raise ValueError("learning_rate must be finite and positive.")
-    if not math.isfinite(weight_decay) or weight_decay < 0:
-        raise ValueError("weight_decay must be finite and non-negative.")
+
+    for name, value in (
+        ("learning_rate", learning_rate),
+        ("weight_decay", weight_decay),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a real number.")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite.")
+    if learning_rate <= 0:
+        raise ValueError("learning_rate must be positive.")
+    if weight_decay < 0:
+        raise ValueError("weight_decay must be non-negative.")
+
+    if seed is not None:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise TypeError("seed must be an integer or None.")
+        if seed < 0:
+            raise ValueError("seed must be non-negative.")
+    for name, value in (
+        ("resume", resume),
+        ("extend_schedule", extend_schedule),
+        ("allow_legacy_resume", allow_legacy_resume),
+    ):
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a boolean.")
 
     if (train_mask_bin is None) != (valid_mask_bin is None):
         raise ValueError("Provide both --train-mask-bin and --valid-mask-bin, or neither.")
@@ -721,7 +751,7 @@ def train_model(
         if valid_masks is not None else None
     )
 
-    actual_seed = config.seed if seed is None else int(seed)
+    actual_seed = config.seed if seed is None else seed
     contract = _resume_contract(
         train_bin, valid_bin, tokenizer_path, train_mask_bin, valid_mask_bin,
         batch_size, seq_len, grad_accum, learning_rate, weight_decay, actual_seed,
