@@ -38,9 +38,10 @@ def cpu_model_name() -> str:
     if cpuinfo.is_file():
         try:
             for line in cpuinfo.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.lower().startswith(("model name", "hardware", "processor")):
+                lowered = line.lower()
+                if lowered.startswith(("model name", "hardware", "cpu model")):
                     candidate = line.split(":", 1)[-1].strip()
-                    if candidate:
+                    if candidate and not candidate.isdigit():
                         return candidate
         except OSError:
             pass
