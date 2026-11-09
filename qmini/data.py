@@ -99,6 +99,24 @@ def _iter_plain(path: Path, chunk_chars: int = 8192) -> Iterator[str]:
         yield "\n".join(buffer)
 
 
+def _ensure_json_eof(
+    handle,
+    buffer: str,
+    cursor: int,
+    path: Path,
+    chunk_chars: int,
+) -> None:
+    """Reject trailing JSON content while reading only bounded chunks."""
+    if buffer[cursor:].strip():
+        raise ValueError(f"Unexpected data after JSON array in {path}.")
+    while True:
+        trailing = handle.read(chunk_chars)
+        if not trailing:
+            return
+        if trailing.strip():
+            raise ValueError(f"Unexpected data after JSON array in {path}.")
+
+
 def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[object]:
     """Incrementally decode a top-level JSON array with bounded input buffering."""
     opening = handle.read(1)
@@ -136,9 +154,7 @@ def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[o
                 if values_seen:
                     raise ValueError(f"Trailing comma in JSON array in {path}.")
                 cursor += 1
-                trailing = buffer[cursor:] + handle.read()
-                if trailing.strip():
-                    raise ValueError(f"Unexpected data after JSON array in {path}.")
+                _ensure_json_eof(handle, buffer, cursor, path, chunk_chars)
                 return
             try:
                 value, end = decoder.raw_decode(buffer, cursor)
@@ -166,9 +182,7 @@ def _iter_json_array(handle, path: Path, chunk_chars: int = 65536) -> Iterator[o
                 expect_value = True
             elif char == "]":
                 cursor += 1
-                trailing = buffer[cursor:] + handle.read()
-                if trailing.strip():
-                    raise ValueError(f"Unexpected data after JSON array in {path}.")
+                _ensure_json_eof(handle, buffer, cursor, path, chunk_chars)
                 return
             else:
                 raise ValueError(
