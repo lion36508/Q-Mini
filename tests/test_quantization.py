@@ -1,3 +1,4 @@
+import hashlib
 import pytest
 import numpy as np
 import torch
@@ -97,16 +98,39 @@ def test_quantization_ablation_script_runs_only_on_own_qmini_checkpoint(
     model = QMiniMoE(config)
     torch.save(model.state_dict(), model_dir / "model.pt")
 
+    tokens_path = tmp_path / "heldout.bin"
+    rng = np.random.default_rng(603)
+    np.asarray(
+        rng.integers(0, config.vocab_size, size=256), dtype=np.uint16
+    ).tofile(tokens_path)
+
     output = tmp_path / "reports" / "quantization.json"
-    report = run_ablation(model_dir, output, group_size=8)
+    report = run_ablation(
+        model_dir,
+        output,
+        group_size=8,
+        eval_tokens=tokens_path,
+        eval_batch_size=1,
+        eval_seq_len=8,
+        eval_batches=2,
+        eval_seed=991,
+    )
     assert output.is_file()
     assert report["source_parameter_count"] == model.parameter_report()["total"]
     assert set(report["formats"]) == {"fp16", "int8", "q2", "ternary", "int4"}
+    assert set(report["heldout_language_evaluation"]) == {
+        "fp16", "int8", "q2", "ternary", "int4"
+    }
+    for evaluation in report["heldout_language_evaluation"].values():
+        assert np.isfinite(evaluation["cross_entropy"])
+        assert evaluation["supervised_target_tokens"] > 0
+        assert evaluation["seed"] == 991
+    assert report["evaluation_dataset_sha256"] == hashlib.sha256(tokens_path.read_bytes()).hexdigest()
     for metrics in report["formats"].values():
         assert np.isfinite(metrics["relative_l2_error"])
         assert np.isfinite(metrics["cosine_similarity"])
         assert metrics["estimated_weight_payload_bytes"] > 0
-    assert any("does not measure validation NLL" in item for item in report["limitations"])
+    assert any("not semantic assistant-quality scores" in item for item in report["limitations"])
 
 
 def test_quantization_ablation_accepts_qmini_owned_latest_checkpoint(
