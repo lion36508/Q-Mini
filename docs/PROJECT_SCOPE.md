@@ -13,13 +13,14 @@ The project is not an Android IDE, not an image model, not a multimodal model an
 - No Transformer self-attention.
 - No Q/K/V projections, dot-product attention, softmax attention or retrieval-attention.
 - No image encoder, image CNN, vision adapter, VAE, GAN or video model branch.
-- Text sequence mixing uses strictly causal left-padded 1D depthwise convolution.
+- Legacy profiles use strictly causal left-padded 1D depthwise convolution. New hybrid profiles add a gated diagonal state-space recurrence with a differentiable parallel scan during training and an equivalent single-token recurrent update during streaming inference.
 - Decoder-only next-token language modeling, initialized from random parameters.
 - Sparse Top-1 expert routing in the current baseline.
 - Quaternary weight alphabet {-2, -1, +1, +2} with FP32 master parameters and STE.
 - Per-token AbsMax INT8 activation fake quantization with STE.
 - RMSNorm and residual paths.
 - Shared iterative refinement reuses one block for a configurable number of passes; it is not a symbolic proof engine.
+- The new diagonal state-space layer is a compressed learned state, not a lossless transcript or exact retrieval memory. It is not an official Mamba or RWKV implementation.
 - Use local, open-source-first tooling. No required paid API, hosted model or pretrained model weights.
 
 The convolution mentioned here is a text-sequence operator; it does not imply image or visual processing.
@@ -41,7 +42,7 @@ The convolution mentioned here is a text-sequence operator; it does not imply im
 | Weight values | -2, -1, +1, +2 |
 | Activation path | Per-token INT8 fake quantization |
 
-Parameter accounting must be computed from the instantiated model. The six main causal convolution blocks have a theoretical receptive field of 568 tokens.
+Parameter accounting must be computed from the instantiated model. The convolution-only baseline has a finite receptive field determined by its dilation schedule. Hybrid profiles add causal compressed recurrent state without self-attention.
 
 ## 4. Capability targets
 
@@ -112,7 +113,7 @@ The pipeline should:
 
 ## 6. Training and checkpoints
 
-Current implementation includes next-token cross-entropy, router load-balancing auxiliary loss, AdamW, gradient accumulation, warmup/cosine scheduling, available GPU mixed precision, evaluation and checkpoint/resume support.
+Current implementation includes next-token cross-entropy, assistant-mask token-weighting across gradient-accumulation microbatches, router load-balancing auxiliary loss, AdamW, gradient accumulation, warmup/cosine scheduling, optional non-reentrant activation checkpointing, available GPU mixed precision, evaluation and fingerprinted checkpoint/resume. A separate --init-from final_model/model.pt path starts a fresh instruction fine-tuning stage.
 
 Checkpoint metadata should remain sufficient to reproduce a run: model state, optimizer state, configuration, step number and RNG state. Resumption must reject a mismatched architecture/configuration. Logs should include train loss, validation loss/perplexity, learning rate, tokens seen, step and expert-load statistics.
 
@@ -171,7 +172,7 @@ Checkpoint metadata should remain sufficient to reproduce a run: model state, op
 
 Q-Mini must not be described as:
 - Already trained or already a capable general-purpose assistant.
-- A 5B model or a model with an unverified parameter count.
+- A trained 5B model or a claim that the current single-process trainer can distribute a 5B run.
 - A Transformer, RWKV implementation or official Microsoft BitNet implementation.
 - An unrestricted autonomous agent. The optional local text memory is not a task-execution agent.
 - A complete integer-only or full ARM64 runtime.
@@ -183,3 +184,10 @@ The project is successful when measured capabilities, reproducible training and 
 ## Capacity profile
 
 The compact 8M-class profile remains available for smoke tests and low-resource experiments. The repository also includes a 134M-class GPU research profile (width 640, hidden width 1,024, ten main blocks, eight experts, 8,192 target vocabulary and 2,048 context). Its full-vocabulary parameter count is verified by runtime audit. It is a larger training experiment, not a claim of general-purpose capability before training and evaluation.
+
+
+## Capacity and execution status
+
+The repository now contains explicit 5M, hybrid 152M and 5B capacity profiles, with parameter counts estimated from the implemented module layout and checked against instantiated smaller/hybrid models in tests. The 5B profile is plan-only until distributed optimizer/model sharding and expert/tensor parallelism are implemented. Its estimated FP32 parameter/gradient/AdamW-state lower bound is about 82.1 GB before activations.
+
+The hybrid diagonal SSM path is a new experimental architecture component. Its scan/stream equivalence and causality are unit-tested; capability improvement must still be demonstrated through trained checkpoints and held-out conversation, reasoning, coding and multilingual evaluations.
