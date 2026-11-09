@@ -129,18 +129,41 @@ def get_native_kernel() -> NativeKernel | None:
     return _NATIVE_KERNEL
 
 
+def native_kernel_should_be_used(kernel: NativeKernel | None = None) -> bool:
+    """Use NEON by default; make the scalar C++ path an explicit opt-in.
+
+    On common x86 CPUs, optimized PyTorch/BLAS can outperform the scalar
+    unpack-and-accumulate loop. Set QMINI_NATIVE_FORCE_SCALAR=1 only when a
+    target-specific benchmark shows that scalar native execution is faster.
+    """
+    active = kernel if kernel is not None else get_native_kernel()
+    if active is None:
+        return False
+    if active.uses_neon:
+        return True
+    return os.environ.get("QMINI_NATIVE_FORCE_SCALAR", "").strip().lower() in {
+        "1", "true", "yes"
+    }
+
+
 def native_kernel_status() -> dict[str, str | bool]:
     path = configured_library_path()
     kernel = get_native_kernel()
+    use_native = native_kernel_should_be_used(kernel)
     return {
         "available": kernel is not None,
         "path": str(path),
         "backend": (
             "native-int8-quaternary-neon"
-            if kernel is not None and kernel.uses_neon
+            if use_native and kernel is not None and kernel.uses_neon
             else "native-int8-quaternary-scalar"
-            if kernel is not None
+            if use_native and kernel is not None
             else "pytorch-fallback"
+        ),
+        "native_kernel_available": kernel is not None,
+        "native_kernel_force_scalar": (
+            os.environ.get("QMINI_NATIVE_FORCE_SCALAR", "").strip().lower()
+            in {"1", "true", "yes"}
         ),
         "uses_neon": bool(kernel.uses_neon) if kernel is not None else False,
     }
