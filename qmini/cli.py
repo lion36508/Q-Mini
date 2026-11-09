@@ -31,6 +31,33 @@ def main() -> int:
         print("Native library:", native["path"])
         print("Attention/QKV: absent by design"); return 0
     audit.set_defaults(func=do_audit)
+
+    plan = commands.add_parser("plan", help="estimate model size and resource requirements without allocating the model")
+    plan.add_argument("--config", required=True)
+    def do_plan(args):
+        cfg = QMiniConfig.from_json(args.config)
+        report = {
+            "config": args.config,
+            "total_parameters": cfg.estimated_parameter_count(),
+            "unique_active_parameters_per_token_top1": cfg.estimated_unique_active_parameter_count(),
+            "fp32_weight_bytes": cfg.estimated_parameter_count() * 4,
+            "fp32_adamw_state_lower_bound_bytes": cfg.estimated_adamw_training_state_bytes(),
+            "dense_reference_tokens_at_20_per_parameter": cfg.reference_tokens_at_20_per_parameter(),
+            "max_context": cfg.max_context,
+            "convolution_receptive_field": cfg.main_receptive_field(),
+            "state_space_enabled": cfg.use_state_space,
+            "gradient_checkpointing": cfg.gradient_checkpointing,
+            "experts": cfg.n_experts,
+            "active_experts_per_token": cfg.top_k,
+            "warning": (
+                "20 tokens per parameter is a dense-LM planning heuristic, not a guarantee "
+                "or a validated sparse-MoE scaling law. Memory excludes activations, workspaces, "
+                "fragmentation and distributed communication."
+            ),
+        }
+        print(json.dumps(report, indent=2))
+        return 0
+    plan.set_defaults(func=do_plan)
     tok = commands.add_parser("tokenizer", help="train a local BPE tokenizer")
     tok.add_argument("--data-dir", nargs="+", required=True); tok.add_argument("--output", required=True)
     tok.add_argument("--vocab-size", type=int, default=4096); tok.add_argument("--min-frequency", type=int, default=2)
@@ -65,6 +92,10 @@ def main() -> int:
     train.add_argument("--eval-every", type=int, default=250); train.add_argument("--save-every", type=int, default=250)
     train.add_argument("--eval-batches", type=int, default=20); train.add_argument("--resume", action="store_true")
     train.add_argument(
+        "--init-from",
+        help="initialize a new fine-tuning run from final_model/model.pt; optimizer state is reset",
+    )
+    train.add_argument(
         "--train-mask-bin",
         help="aligned uint8 target mask; required for prepared auto/assistant datasets",
     )
@@ -81,7 +112,8 @@ def main() -> int:
         train_model(QMiniConfig.from_json(a.config), a.train_bin, a.valid_bin, a.output_dir,
             a.steps, a.batch_size, a.seq_len, a.grad_accum, a.lr, a.weight_decay,
             a.eval_every, a.save_every, a.eval_batches, a.resume, a.tokenizer, None,
-            a.extend_schedule, a.allow_legacy_resume, a.train_mask_bin, a.valid_mask_bin); return 0
+            a.extend_schedule, a.allow_legacy_resume, a.train_mask_bin, a.valid_mask_bin,
+            init_from=a.init_from); return 0
     train.set_defaults(func=do_train)
     gen = commands.add_parser("generate", help="generate from a trained model")
     gen.add_argument("--model-dir", required=True); gen.add_argument("--prompt", required=True)
