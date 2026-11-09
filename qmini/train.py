@@ -162,7 +162,8 @@ def _evaluate(
     was_training = model.training
     model.eval()
     rng = np.random.default_rng(seed)
-    losses: list[float] = []
+    total_negative_log_likelihood = 0.0
+    total_supervised_targets = 0.0
     try:
         with torch.inference_mode():
             for _ in range(batches):
@@ -170,16 +171,19 @@ def _evaluate(
                     tokens, masks, batch_size, seq_len, rng, device
                 )
                 result = model(x)
-                loss = _masked_cross_entropy(
+                nll_sum, target_count = _masked_cross_entropy_sum(
                     result["logits"], y, target_mask
                 )
-                if not torch.isfinite(loss):
+                if not torch.isfinite(nll_sum):
                     raise FloatingPointError("Validation loss became non-finite.")
-                losses.append(float(loss.item()))
+                total_negative_log_likelihood += float(nll_sum.item())
+                total_supervised_targets += float(target_count.item())
     finally:
         model.train(was_training)
 
-    mean_loss = float(np.mean(losses))
+    if total_supervised_targets <= 0:
+        raise ValueError("Validation run contains no supervised target tokens.")
+    mean_loss = total_negative_log_likelihood / total_supervised_targets
     perplexity = math.exp(mean_loss) if mean_loss < 709.0 else None
     return {"eval_loss": mean_loss, "eval_perplexity": perplexity}
 
