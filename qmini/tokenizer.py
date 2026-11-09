@@ -21,6 +21,7 @@ def train_tokenizer(
     min_frequency: int = 2,
     overwrite: bool = False,
     validation_fraction: float = 0.02,
+    near_duplicate_distance: int = 0,
 ) -> Tokenizer:
     """Train byte-level BPE on unique training documents, excluding validation docs."""
     target = Path(output_path)
@@ -53,7 +54,11 @@ def train_tokenizer(
         show_progress=True,
     )
     tokenizer.train_from_iterator(
-        iter_training_text_records(paths, valid_fraction=validation_fraction),
+        iter_training_text_records(
+            paths,
+            valid_fraction=validation_fraction,
+            near_duplicate_distance=near_duplicate_distance,
+        ),
         trainer,
     )
 
