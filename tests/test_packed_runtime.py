@@ -172,7 +172,7 @@ def _write_legacy_q2_v1_archive(state_dict, config, path):
 
 
 def test_legacy_q2_v1_export_reconstruct_and_runtime_compatibility(
-    tiny_config, tmp_path
+    tiny_config, tmp_path, monkeypatch
 ):
     from qmini.export import reconstruct_packed_state, verify_packed_export
 
@@ -197,6 +197,25 @@ def test_legacy_q2_v1_export_reconstruct_and_runtime_compatibility(
             assert module._qmini_q2_version == 1
 
     ids = torch.randint(0, config.vocab_size, (1, 11))
+
+    # The source model's current forward path uses Q2-v2 STE. To compare a
+    # legacy v1 archive fairly, reproduce the historical Q2-v1 fake quantizer
+    # only for the reference forward pass.
+    import qmini.model as model_module
+
+    def legacy_v1_fake_quantizer(weight):
+        flat = weight.reshape(weight.shape[0], -1)
+        scale = flat.detach().abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
+        magnitude = torch.where(
+            flat.detach().abs() / scale >= 1.5, 2.0, 1.0
+        )
+        sign = torch.where(flat.detach() < 0, -1.0, 1.0)
+        q = (sign * magnitude * scale).reshape_as(weight)
+        return weight + (q - weight).detach()
+
+    monkeypatch.setattr(
+        model_module, "quantize_quaternary", legacy_v1_fake_quantizer
+    )
     with torch.inference_mode():
         expected = reference(ids)["logits"]
         actual = packed(ids)["logits"]
