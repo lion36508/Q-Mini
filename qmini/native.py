@@ -73,8 +73,12 @@ class NativeKernel:
             raise ValueError("Packed weight shape does not exactly match activation dimensions.")
         if xs.shape != (x.shape[0],):
             raise ValueError("activation_scales must contain one scale per input row.")
-        if q2_version not in (1, 2):
-            raise ValueError("q2_version must be 1 or 2.")
+        if (
+            isinstance(q2_version, bool)
+            or not isinstance(q2_version, int)
+            or q2_version not in (1, 2)
+        ):
+            raise ValueError("q2_version must be the integer 1 or 2.")
         if not np.isfinite(ws).all() or (
             np.any(ws <= 0) if q2_version == 1 else np.any(ws < 0)
         ):
