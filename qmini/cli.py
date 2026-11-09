@@ -45,14 +45,37 @@ def main() -> int:
 
     plan = commands.add_parser("plan", help="estimate model size and resource requirements without allocating the model")
     plan.add_argument("--config", required=True)
+    plan.add_argument("--world-size", type=int, default=1,
+        help="hypothetical number of ranks for lower-bound sharding estimates only")
+    plan.add_argument("--sharding-scenario", choices=("none", "fsdp-full-shard", "zero3"), default="none",
+        help="hypothetical sharding scenario; this does not enable distributed training")
     def do_plan(args):
         cfg = QMiniConfig.from_json(args.config)
+        if args.world_size < 1:
+            raise SystemExit("--world-size must be positive.")
+        if args.sharding_scenario == "none" and args.world_size != 1:
+            raise SystemExit("--world-size greater than 1 requires an explicit sharding scenario.")
+        optimizer_state_bytes = cfg.estimated_adamw_training_state_bytes()
+        sharded_state_per_rank = (
+            (optimizer_state_bytes + args.world_size - 1) // args.world_size
+            if args.sharding_scenario != "none"
+            else optimizer_state_bytes
+        )
         report = {
             "config": args.config,
             "total_parameters": cfg.estimated_parameter_count(),
             "unique_active_parameters_per_token_top1": cfg.estimated_unique_active_parameter_count(),
             "fp32_weight_bytes": cfg.estimated_parameter_count() * 4,
-            "fp32_adamw_state_lower_bound_bytes": cfg.estimated_adamw_training_state_bytes(),
+            "fp32_adamw_state_lower_bound_bytes": optimizer_state_bytes,
+            "distributed_training_implemented": False,
+            "sharding_scenario": args.sharding_scenario,
+            "world_size": args.world_size,
+            "ideal_fully_sharded_fp32_adamw_state_lower_bound_per_rank_bytes": sharded_state_per_rank,
+            "sharded_estimate_warning": (
+                "Hypothetical lower bound only. Q-Mini does not yet implement FSDP/ZeRO; "
+                "this division excludes all-gather/reshard peaks, activations, workspaces, "
+                "communication buffers, fragmentation, rank imbalance and data-loader memory."
+            ),
             "estimated_q2_fp16_export_bytes": cfg.estimated_packed_export_bytes(),
             "estimated_q2_fp16_export_gb_decimal": cfg.estimated_packed_export_bytes() / 1_000_000_000,
             "estimated_q2_fp16_export_gib": cfg.estimated_packed_export_bytes() / (1024 ** 3),
