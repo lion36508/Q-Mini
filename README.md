@@ -356,3 +356,11 @@ Existing Q2-v1 archives ({-2,-1,+1,+2} with legacy scales) remain readable. New 
 
 
 For a small Q-Mini-owned checkpoint, the quantization ablation can additionally measure held-out NLL/perplexity using `--eval-tokens PATH --eval-seq-len 128 --eval-batches 100 --eval-seed 42`. For response-only evaluation add `--eval-mask PATH`. All candidate formats use the same validation stream and INT8 activation path. The default 10M-parameter evaluation cap bounds memory use; weight-error-only reports remain available for larger checkpoints.
+
+
+
+### Quantization ablation provenance and reporting
+
+The quantization ablation tool now groups tensor reconstruction metrics by embedding, output projection, router, expert, convolution, state-space and other components. For each Q2 matrix it records the row-scale distribution (including zero-row count) and separate packed-symbol, FP32-scale and FP16-vector payload bytes. When the final model directory contains model.qmini.npz, it also records the exact archive byte size.
+
+For a dense model.pt FP16 reference, the tool requires a matching Q-Mini model_manifest.json with config, parameter count, packed archive size and SHA-256 fingerprints for both the dense snapshot and packed export. Use the run's own latest.pt when comparing older runs that predate these manifest fingerprints. This avoids silently comparing a stale dense snapshot with an unrelated packed archive.
