@@ -2,7 +2,7 @@
 
 ## Scope and honesty
 
-This is a **static source and test-coverage audit** of the `main` branch at commit `4aa23e8ed024045988a571eab555c375ac72c1c4`. The review covered the model, configuration, data ingestion, tokenizer, training loop, generation/chat, packed export/runtime, quantization, native projection kernel, evaluation, CLI, benchmark, project docs, and the corresponding test files.
+This began as a **static source and test-coverage audit** at commit `4aa23e8ed024045988a571eab555c375ac72c1c4`; the follow-up status below is updated against the later successful CI commit `852a8ccc619533983c222bffee60e35feace9c87`. The review covered the model, configuration, data ingestion, tokenizer, training loop, generation/chat, packed export/runtime, quantization, native projection kernel, evaluation, CLI, benchmark, project docs, and the corresponding test files.
 
 The source was reviewed remotely through GitHub. The full test suite was **not executed in this audit session**, and no training run or hardware benchmark was performed. Findings below distinguish confirmed code defects from engineering gaps and research risks. A static review cannot prove that every possible defect has been found.
 
@@ -40,14 +40,14 @@ These are real engineering foundations, not evidence that the design is already 
 
 ## 2. Confirmed defects reported as focused issues
 
-### #25 — JSON arrays with legal leading whitespace are rejected
+### #25 — RESOLVED: JSON arrays with legal leading whitespace
 File: `qmini/data.py`, `_iter_json_file()` and `_iter_json_array()`.
 
 Format detection skips leading whitespace, then seeks back to the start. The streaming array parser immediately reads one character and requires it to be `[`. Valid files beginning with spaces/newlines therefore fail. The report asks for bounded whitespace skipping and regression cases for spaces, tabs, blank lines and BOM.
 
 https://github.com/lion36508/Q-Mini/issues/25
 
-### #26 — long interactive-chat history can lose role/control markers
+### #26 — RESOLVED: long interactive-chat history now preserves role/control markers
 File: `qmini/generate.py`, `interactive_chat()`.
 
 The trim branch slices an arbitrary token suffix and calls `tokenizer.decode()` without explicitly preserving special tokens. The Hugging Face Tokenizers API documents `skip_special_tokens=True` as the default for `tokenizers.Tokenizer.decode()`; Q-Mini's role and end markers are special tokens. The result can remove message boundaries, and the arbitrary slice can begin mid-turn. The issue requests turn-aware truncation and a regression test that continues chatting after truncation.
@@ -56,14 +56,14 @@ Reference for the Tokenizers decode default: https://huggingface.co/docs/tokeniz
 
 https://github.com/lion36508/Q-Mini/issues/26
 
-### #27 — tokenizer's zero validation-fraction contract is inconsistent
+### #27 — RESOLVED: tokenizer's zero validation-fraction contract is consistent
 Files: `qmini/tokenizer.py` and `qmini/data.py`.
 
 `train_tokenizer()` accepts `validation_fraction=0`, but delegates to `iter_training_text_records()`, which rejects `valid_fraction=0`. The CLI also accepts the float and fails later in the helper. The issue requests a single documented contract: either support tokenizer fitting with no holdout, or reject zero at the public API/CLI boundary.
 
 https://github.com/lion36508/Q-Mini/issues/27
 
-### #28 — sparse response masks can make random window sampling abort
+### #28 — RESOLVED: sparse response-mask windows are indexed and sampled safely
 File: `qmini/train.py`, `_sample_batch()`.
 
 The loader checks that a mask has some supervised tokens somewhere in the full stream. The sampler then makes at most 128 uniformly random proposals per sample and raises if all those windows miss the supervised positions. With extremely sparse response-only labels, the dataset can be globally valid while a training/evaluation batch fails probabilistically. The issue requests a supervised-position-aware or deterministic fallback sampler and tests for sparse/boundary masks.
@@ -103,7 +103,8 @@ Existing tracked work for these broader gaps:
 - #21 — reproducible Q-Mini-owned pretraining to SFT workflow.
 - #22 — Q2 versus ternary/INT4/FP16 ablations.
 - #23 — assistant capability benchmarks.
-- #8 — trained-model prefill/decode and target-runtime benchmark.
+- #8 — CLOSED: Linux CPU smoke-model prefill/decode instrumentation is implemented and exercised in CI; it is not a 5B/phone benchmark.
+- #19 — CLOSED: all configured refinement depths are measured with deterministic validation windows and per-depth metrics.
 
 ## 4. Existing areas that looked sound in this static pass
 
@@ -137,6 +138,12 @@ This section is a record of reviewed paths, not a formal proof of correctness.
 - The full pytest suite was not run in this session. Review of source and test files is not the same as executing the tests.
 - No GPU, Colab, ARM phone, memory, speed, energy or thermal benchmark was performed.
 - This report does not claim that every possible defect has been discovered.
+
+## Follow-up verification on main
+
+The later CI run #323 succeeded on commit `852a8ccc619533983c222bffee60e35feace9c87`: **143 tests passed and 3 were skipped** (two CUDA-only numerical stress cases on CPU CI, one NEON-only selection case on x86_64). CI also built the C++ projection kernel, cross-compiled ARM64 NEON, installed the package wheel, trained a tiny 33,606-parameter smoke checkpoint, measured prefill and cached decode, and exercised the Q2/INT8/ternary/INT4 ablation plus task and multi-turn evaluation tools.
+
+Issues #8, #19, #25, #26, #27, #28 and #29 were closed only after this passing run and their regression coverage. Issues #12, #13, #17, #18, #20, #21, #22 and #23 remain open because they still require material work or target-hardware/quality evidence. The latest follow-up enhancement to the quantization report (component-level metrics, row-scale summaries and exact weight-payload breakdown) is being tested separately; do not treat it as covered by run #323 until its own commit has a green workflow.
 
 ## Audit conclusion
 
