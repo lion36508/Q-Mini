@@ -315,7 +315,7 @@ def run_ablation(
         "tensor_results": per_tensor,
         "limitations": [
             "Weight reconstruction metrics are always reported; held-out NLL/perplexity are reported only when --eval-tokens is supplied.",
-            "Held-out language-model loss is not a semantic assistant-quality score and does not measure task-level capability.",
+            "Reconstruction metrics and held-out language-model loss are not semantic assistant-quality scores; task-level capability must be evaluated separately.",
             "All formats are experimental; this script does not change the model's default quantizer.",
             "Only Q-Mini-owned final_model/model.pt or its own latest.pt training checkpoint is accepted; no external pretrained weights are loaded.",
         ],
