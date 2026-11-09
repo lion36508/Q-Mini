@@ -258,6 +258,31 @@ def _verify_prepared_dataset_manifest(
     if manifest.get("tokenizer_sha256") != actual_tokenizer_hash:
         raise ValueError("Tokenizer SHA-256 does not match the prepared dataset manifest.")
 
+    tokenizer_sidecar = Path(str(tokenizer_path) + ".qmini.json")
+    if tokenizer_sidecar.is_file():
+        try:
+            sidecar = json.loads(tokenizer_sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Could not read tokenizer split manifest: {tokenizer_sidecar}"
+            ) from exc
+        if sidecar.get("format") != "qmini-tokenizer-manifest-v1":
+            raise ValueError("Unsupported tokenizer split manifest format.")
+        if sidecar.get("tokenizer_sha256") != actual_tokenizer_hash:
+            raise ValueError("Tokenizer split manifest does not match tokenizer.json.")
+        if sidecar.get("validation_fraction") != float(
+            manifest.get("valid_fraction_requested", -1)
+        ):
+            raise ValueError(
+                "Tokenizer and prepared dataset use different validation fractions."
+            )
+        if sidecar.get("near_duplicate_hamming_distance") != int(
+            manifest.get("near_duplicate_hamming_distance", 0)
+        ):
+            raise ValueError(
+                "Tokenizer and prepared dataset use different near-duplicate thresholds."
+            )
+
     artifacts = [
         ("train_tokens_sha256", train_file, "Training token stream"),
         ("valid_tokens_sha256", valid_file, "Validation token stream"),
