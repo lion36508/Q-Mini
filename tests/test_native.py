@@ -269,3 +269,60 @@ def test_neon_native_kernel_is_selected_without_force_flag(
         pytest.skip("This runner has no NEON backend.")
     monkeypatch.delenv("QMINI_NATIVE_FORCE_SCALAR", raising=False)
     assert native_module.native_kernel_should_be_used(kernel) is True
+
+
+
+def test_native_q2_v2_zero_scale_row_matches_python_reference(compiled_native_library):
+    from qmini.quantization import pack_quaternary, unpack_quaternary
+
+    native = NativeKernel(compiled_native_library)
+    weight = torch.tensor([
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [-2.0, -0.5, 0.0, 0.5, 2.0],
+    ])
+    packed, scales = pack_quaternary(weight)
+    assert scales[0] == 0.0
+    assert scales[1] > 0.0
+    x = np.array([[0.25, -0.5, 1.0, 0.75, -1.0]], dtype=np.float32)
+    x_scale = np.maximum(np.max(np.abs(x), axis=1), 1e-8) / 127.0
+    x_q = np.rint(x / x_scale[:, None]).clip(-127, 127).astype(np.int8)
+
+    actual = native.linear(
+        x_q, packed, scales, x_scale.astype(np.float32), q2_version=2
+    )
+    dequantized = unpack_quaternary(packed, scales, 5, format_version=2)
+    expected = (x_q.astype(np.float32) @ dequantized.T) * x_scale[:, None]
+    assert np.allclose(actual, expected, atol=1e-5, rtol=1e-5)
+    assert actual[0, 0] == 0.0
+
+
+def test_native_q2_v1_legacy_projection_uses_legacy_codebook(compiled_native_library):
+    native = NativeKernel(compiled_native_library)
+    # Four legacy symbols [-2,-1,+1,+2] with a single positive v1 scale.
+    packed = np.array([[0b11100100]], dtype=np.uint8)
+    scales = np.array([0.25], dtype=np.float32)
+    x_q = np.array([[1, 2, 3, 4]], dtype=np.int8)
+    x_scale = np.array([0.1], dtype=np.float32)
+    actual = native.linear(
+        x_q, packed, scales, x_scale, q2_version=1
+    )
+    legacy_weight = np.array([[-2.0, -1.0, 1.0, 2.0]], dtype=np.float32) * 0.25
+    expected = (x_q.astype(np.float32) @ legacy_weight.T) * 0.1
+    assert np.allclose(actual, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_native_q2_v2_rejects_negative_scale_but_accepts_zero(compiled_native_library):
+    native = NativeKernel(compiled_native_library)
+    x_q = np.ones((1, 4), dtype=np.int8)
+    packed = np.zeros((2, 1), dtype=np.uint8)
+    x_scale = np.ones(1, dtype=np.float32)
+    with pytest.raises(ValueError, match="non-negative"):
+        native.linear(
+            x_q, packed, np.array([0.0, -1.0], dtype=np.float32),
+            x_scale, q2_version=2,
+        )
+    out = native.linear(
+        x_q, packed, np.array([0.0, 0.0], dtype=np.float32),
+        x_scale, q2_version=2,
+    )
+    assert np.array_equal(out, np.zeros((1, 2), dtype=np.float32))
