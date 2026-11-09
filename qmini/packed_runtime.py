@@ -30,6 +30,7 @@ def _unpack_rows(
     scales: np.ndarray,
     row_ids: np.ndarray,
     in_features: int,
+    format_version: int = 2,
 ) -> np.ndarray:
     selected = np.asarray(packed[row_ids], dtype=np.uint8)
     selected_scales = np.asarray(scales[row_ids], dtype=np.float32).reshape(-1, 1)
@@ -37,10 +38,13 @@ def _unpack_rows(
         [((selected >> shift) & 3) for shift in (0, 2, 4, 6)],
         axis=-1,
     ).reshape(selected.shape[0], -1)[:, :in_features]
-    values = np.select(
-        [codes == 0, codes == 1, codes == 2, codes == 3],
-        [-2.0, -1.0, 1.0, 2.0],
-    ).astype(np.float32)
+    if format_version == 1:
+        codebook = (-2.0, -1.0, 1.0, 2.0)
+    elif format_version == 2:
+        codebook = (-1.0, -0.5, 0.5, 1.0)
+    else:
+        raise ValueError(f"Unsupported Q2 format version: {format_version!r}.")
+    values = np.asarray(codebook, dtype=np.float32)[codes]
     return values * selected_scales
 
 
@@ -54,7 +58,10 @@ def packed_embedding_lookup(module: nn.Module, token_ids: torch.Tensor) -> torch
     ids = token_ids.detach().to(dtype=torch.long).numpy().reshape(-1)
     if ids.size and (int(ids.min()) < 0 or int(ids.max()) >= packed.shape[0]):
         raise ValueError("Token IDs are outside the packed embedding vocabulary.")
-    rows = _unpack_rows(packed, scales, ids, int(module._qmini_in_features))
+    rows = _unpack_rows(
+        packed, scales, ids, int(module._qmini_in_features),
+        int(getattr(module, "_qmini_q2_version", 2)),
+    )
     result = torch.from_numpy(rows).reshape(
         *token_ids.shape, int(module._qmini_in_features)
     )
@@ -79,7 +86,10 @@ def _fallback_packed_linear(
     for start in range(0, out_features, chunk_rows):
         end = min(out_features, start + chunk_rows)
         weight = torch.from_numpy(
-            unpack_quaternary(packed[start:end], scales[start:end], in_features)
+            unpack_quaternary(
+                packed[start:end], scales[start:end], in_features,
+                format_version=int(getattr(module, "_qmini_q2_version", 2)),
+            )
         )
         chunk_bias = (
             bias[start:end].float()
@@ -116,6 +126,7 @@ def packed_linear_forward(
             _buffer_array(module, "_qmini_weight_scales"),
             activation_scales.contiguous().numpy(),
             bias_array,
+            q2_version=int(getattr(module, "_qmini_q2_version", 2)),
         )
         return torch.from_numpy(output).reshape(
             *x.shape[:-1], int(module._qmini_out_features)
@@ -145,8 +156,19 @@ def load_packed_model(
         if "metadata_json" not in archive:
             raise ValueError("Packed Q-Mini archive is missing metadata_json.")
         metadata = json.loads(str(archive["metadata_json"].item()))
-        if metadata.get("format") != "qmini-packed-v1":
+        archive_format = metadata.get("format")
+        if archive_format not in {"qmini-packed-v1", "qmini-packed-v2"}:
             raise ValueError("Unsupported Q-Mini packed export format.")
+        q2_version = 1 if archive_format == "qmini-packed-v1" else 2
+        if q2_version == 2:
+            expected_contract = {
+                "version": 2,
+                "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+                "row_scale": "2 * mean(abs(original_output_row))",
+                "all_zero_row_scale": 0.0,
+            }
+            if metadata.get("q2_contract") != expected_contract:
+                raise ValueError("Q2-v2 archive contract metadata is missing or invalid.")
         config = QMiniConfig.from_dict(metadata["config"])
         if expected_config is not None and config.to_dict() != expected_config.to_dict():
             raise ValueError("Packed model config does not match config.json.")
@@ -187,8 +209,10 @@ def load_packed_model(
                     raise ValueError(f"Invalid packed matrix dimensions for {name}.")
                 if scales.dtype != np.float32 or scales.shape != (rows,):
                     raise ValueError(f"Invalid Q2 row scales for {name}.")
-                if not np.isfinite(scales).all() or np.any(scales <= 0):
-                    raise ValueError(f"Non-finite or non-positive Q2 scale in {name}.")
+                if not np.isfinite(scales).all() or (
+                    np.any(scales <= 0) if q2_version == 1 else np.any(scales < 0)
+                ):
+                    raise ValueError(f"Non-finite or invalid Q2 scale in {name}.")
                 if not isinstance(parent, (QLinear, QEmbedding, CausalGatedDepthwiseConv)):
                     raise ValueError(f"Unsupported Q2 parameter owner for {name}.")
                 if isinstance(parent, CausalGatedDepthwiseConv) and leaf != "depthwise_weight":
@@ -202,6 +226,7 @@ def load_packed_model(
                 parent.register_buffer(
                     "_qmini_weight_scales", torch.from_numpy(scales), persistent=False
                 )
+                parent._qmini_q2_version = q2_version
                 parent._qmini_weight_shape = shape
                 parent._qmini_in_features = in_features
                 parent._qmini_out_features = rows
