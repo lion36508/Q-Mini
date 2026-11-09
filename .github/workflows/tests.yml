@@ -39,6 +39,23 @@ jobs:
           aarch64-linux-gnu-g++ -O3 -DNDEBUG -std=c++17 -fPIC -shared \
             qmini/native_kernel.cpp -o /tmp/libqmini_kernel_aarch64.so
           file /tmp/libqmini_kernel_aarch64.so
+      - name: Validate Colab notebook Python syntax
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+
+          path = Path("colab/QMini_Training.ipynb")
+          notebook = json.loads(path.read_text(encoding="utf-8"))
+          count = 0
+          for index, cell in enumerate(notebook.get("cells", []), start=1):
+              if cell.get("cell_type") == "code":
+                  source = "".join(cell.get("source", []))
+                  ast.parse(source, filename=f"{path}:cell-{index}")
+                  count += 1
+          print(f"Parsed {count} Python code cells in {path}")
+          PY
       - name: Run tests
         run: pytest -q
       - name: Run audit and CLI checks
