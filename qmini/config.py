@@ -217,8 +217,10 @@ class QMiniConfig:
                 )
             )
         )
+        # Depthwise convolution is a separate Q2 matrix with one row
+        # per channel, in addition to the dense projection rows.
         q2_row_count = vocab + blocks * (
-            shared_projection_factor * d + experts * (h + d + 1)
+            (shared_projection_factor + 1) * d + experts * (h + d + 1)
         )
         row_scale_bytes = q2_row_count * 4
         fp16_vector_bytes = vector_parameters * 2
