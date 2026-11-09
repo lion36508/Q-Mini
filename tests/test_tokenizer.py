@@ -113,3 +113,20 @@ def test_tokenizer_refuses_empty_training_partition(tmp_path):
             [corpus], tmp_path / "tokenizer.json",
             vocab_size=300, min_frequency=1, validation_fraction=0.49,
         )
+
+
+def test_zero_validation_fraction_is_rejected_at_tokenizer_api_boundary(tmp_path):
+    corpus = tmp_path / "zero-holdout.txt"
+    corpus.write_text(
+        "A first independent document for tokenizer fitting.\n\n"
+        "A second independent document for tokenizer fitting.",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="greater than 0 and below 0.5"):
+        train_tokenizer(
+            [corpus],
+            tmp_path / "tokenizer.json",
+            vocab_size=300,
+            min_frequency=1,
+            validation_fraction=0.0,
+        )
