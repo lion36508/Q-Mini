@@ -6,6 +6,10 @@
 
 [![Q-Mini CI](https://github.com/lion36508/Q-Mini/actions/workflows/tests.yml/badge.svg)](https://github.com/lion36508/Q-Mini/actions/workflows/tests.yml)
 
+## Build an untrained Q2-v2 initial brain
+
+For the step-zero two-bit Q2-v2 build (without allocating the complete dense 5B model), use [the initial-brain Colab and CLI guide](docs/INITIAL_BRAIN_Q2_BUILD.md). Do not confuse the packed deployment artifact with the temporary FP32 master parameters used by QAT training.
+
 ## 1. Project vision
 
 The long-term goal is to train Q-Mini into a useful general-purpose **text assistant** that can understand user instructions, maintain coherent conversations, explain difficult topics, solve structured problems, assist with programming and help users work through technical tasks.

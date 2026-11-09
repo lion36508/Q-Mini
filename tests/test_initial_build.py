@@ -42,7 +42,11 @@ def test_initial_build_emits_verified_q2_v2_artifact(tiny_config, tmp_path):
 
     with (target_dir / "model_manifest.json").open(encoding="utf-8") as handle:
         saved_manifest = json.load(handle)
-    assert saved_manifest == manifest
+    from qmini.config import QMiniConfig
+    assert QMiniConfig.from_dict(saved_manifest.pop("config")).to_dict() == tiny_config.to_dict()
+    expected_manifest = dict(manifest)
+    expected_manifest.pop("config")
+    assert saved_manifest == expected_manifest
 
     packed_model = load_packed_model(
         target_dir / "model.qmini.npz", expected_config=tiny_config
