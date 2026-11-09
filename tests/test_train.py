@@ -46,6 +46,20 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
     assert checkpoint["format"] == "qmini-checkpoint-v2"
     assert checkpoint["resume_contract"]["train"]["sha256"]
     assert checkpoint["tokens_seen"] == 16
+    assert sum(checkpoint["thinking_step_counts"].values()) == 2
+    metrics = [
+        json.loads(line)
+        for line in (run / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(metrics) == 2
+    for record in metrics:
+        assert set(record["eval_by_thinking_steps"]) == {
+            str(value) for value in range(1, tiny_config.max_thinking_steps + 1)
+        }
+        assert record["eval_primary_thinking_steps"] == tiny_config.thinking_steps
+        assert record["eval_thinking_steps"] == tiny_config.thinking_steps
+        assert record["eval_supervised_tokens"] > 0
+        assert sum(record["thinking_step_sampling_counts"].values()) == record["step"]
 
     train_model(
         tiny_config, train_bin, valid_bin, run,
@@ -56,6 +70,7 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
     resumed = torch.load(run / "latest.pt", map_location="cpu", weights_only=False)
     assert resumed["step"] == 3
     assert resumed["schedule_total_steps"] == 3
+    assert sum(resumed["thinking_step_counts"].values()) == 3
 
     report = verify_packed_export(final / "model.qmini.npz")
     assert report["tensor_count"] == len(resumed["model"])
