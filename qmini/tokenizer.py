@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Iterable
@@ -64,11 +66,30 @@ def train_tokenizer(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
+    manifest_path = Path(str(target) + ".qmini.json")
+    manifest_temporary = manifest_path.with_name(manifest_path.name + ".tmp")
     try:
         tokenizer.save(str(temporary))
+        digest = hashlib.sha256()
+        with temporary.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        manifest = {
+            "format": "qmini-tokenizer-manifest-v1",
+            "tokenizer_sha256": digest.hexdigest(),
+            "validation_fraction": float(validation_fraction),
+            "near_duplicate_hamming_distance": int(near_duplicate_distance),
+        }
+        with manifest_temporary.open("w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, target)
+        os.replace(manifest_temporary, manifest_path)
     finally:
         temporary.unlink(missing_ok=True)
+        manifest_temporary.unlink(missing_ok=True)
     return tokenizer
 
 
