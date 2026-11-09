@@ -43,7 +43,7 @@ This means:
 - exact zero entries in a non-zero row map to +0.5 times the row scale because the production codebook contains no zero symbol;
 - an entirely zero row has scale exactly zero and reconstructs to exact zeros regardless of its stored symbols.
 
-The normalized fake quantizer uses the threshold |w|/s >= 0.75 to select magnitude 1, otherwise 0.5. Since s=2*mean(|w|), this is the same decision boundary as the legacy v1 |w|/mean(|w|)>=1.5, but the symbols are normalized and the scale is doubled. The resulting effective QAT weights are unchanged for non-zero rows while the packed representation is explicit and consistently normalized.
+The normalized fake quantizer uses the threshold |w|/s >= 0.75 to select magnitude 1, otherwise 0.5. Since s=2*mean(|w|), this is the same decision boundary as the legacy v1 |w|/mean(|w|)>=1.5, but the symbols are normalized and the scale is doubled. For threshold decisions only, the QAT path and packer clamp the divisor to 1e-8; the stored row scale remains the exact 2*mean value, including zero or a tiny non-zero value. The resulting effective QAT weights are unchanged for non-zero rows while the packed representation is explicit and consistently normalized.
 
 Non-finite matrix weights are rejected. For a zero row, no division by zero is performed.
 
