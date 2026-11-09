@@ -42,7 +42,10 @@ def test_prepare_deduplicates_and_guarantees_nonempty_splits(tmp_path):
         encoding="utf-8",
     )
     tokenizer_path = tmp_path / "tokenizer.json"
-    train_tokenizer([corpus], tokenizer_path, vocab_size=300, min_frequency=1)
+    train_tokenizer(
+        [corpus], tokenizer_path, vocab_size=300, min_frequency=1,
+        validation_fraction=0.01,
+    )
 
     output = tmp_path / "tokens"
     report = prepare_token_streams(
@@ -85,7 +88,10 @@ def test_assistant_loss_mask_excludes_user_prompt_tokens(tmp_path):
         encoding="utf-8",
     )
     tokenizer_path = tmp_path / "conversation-tokenizer.json"
-    train_tokenizer([corpus], tokenizer_path, vocab_size=400, min_frequency=1)
+    train_tokenizer(
+        [corpus], tokenizer_path, vocab_size=400, min_frequency=1,
+        validation_fraction=0.01,
+    )
     output = tmp_path / "assistant-targets"
 
     report = prepare_token_streams(
@@ -120,7 +126,10 @@ def test_structured_conversations_use_dedicated_role_and_end_tokens(tmp_path):
         encoding="utf-8",
     )
     tokenizer_path = tmp_path / "control-tokenizer.json"
-    trained = train_tokenizer([corpus], tokenizer_path, vocab_size=400, min_frequency=1)
+    trained = train_tokenizer(
+        [corpus], tokenizer_path, vocab_size=400, min_frequency=1,
+        validation_fraction=0.01,
+    )
     report = prepare_token_streams(
         [corpus], tokenizer_path, tmp_path / "control-streams",
         valid_fraction=0.01, loss_mask_mode="assistant",
@@ -251,7 +260,10 @@ def test_json_object_reader_and_private_source_manifest_paths(tmp_path):
         "\n".join(json.dumps(item) for item in rows), encoding="utf-8"
     )
     tokenizer_path = tmp_path / "tokenizer.json"
-    train_tokenizer([tokenizer_source], tokenizer_path, vocab_size=300, min_frequency=1)
+    train_tokenizer(
+        [tokenizer_source], tokenizer_path, vocab_size=300, min_frequency=1,
+        validation_fraction=0.1,
+    )
 
     default_output = tmp_path / "prepared-default"
     prepare_token_streams(
