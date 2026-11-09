@@ -143,3 +143,11 @@ Ternary/INT4/INT8 weight quantizers remain experimental ablation methods and are
 
 
 When running quantization ablations, optionally pass `--eval-tokens` (and `--eval-mask` for assistant-only targets) plus a fixed sequence length, batch count and seed. The tool evaluates FP16, INT8, Q2-v2, ternary and INT4 candidate weights against the exact same held-out token stream while keeping the INT8 activation path fixed. The default evaluation cap is 10M parameters to bound host-memory use from candidate state copies; raise it only on a machine with enough RAM. The report records the evaluation stream/mask hashes, token-weighted NLL and perplexity per format. This is still a language-model metric, not a semantic assistant-quality score.
+
+
+
+## Quantization report provenance
+
+The ablation report groups per-tensor reconstruction metrics into embedding, output-projection, router, expert, convolution, state-space and other components. It records Q2 row-scale distributions, including the number of zero-scale rows, and splits estimated payload into packed matrix-symbol/FP16 matrix bytes, scales and vectors. If the exact packed export is present beside the source model, its file size is reported separately.
+
+A final-model model.pt can be used as the higher-precision reference only when its model_manifest.json matches the config/parameter count and its dense and packed export SHA-256 values. A Q-Mini-owned latest.pt training checkpoint remains a supported alternative. These integrity checks prevent a stale FP16 file from being compared with a different packed release.
