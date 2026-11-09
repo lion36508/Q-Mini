@@ -168,5 +168,67 @@ class QMiniConfig:
         """Compute-budget heuristic using active Top-1 parameters; not an MoE scaling law."""
         return self.estimated_unique_active_parameter_count() * 20
 
+    def estimated_packed_export_bytes(self, metadata_reserve_bytes: int = 65536) -> int:
+        """Conservative raw size of the Q2+FP16 deployment archive.
+
+        All rank-2/3 projection weights use four signed quaternary values per
+        byte plus one FP32 scale per output row. One-dimensional vectors use
+        FP16. Row padding is counted exactly; the metadata reserve covers the
+        JSON manifest and ZIP container overhead.
+        """
+        self.validate()
+        if (
+            isinstance(metadata_reserve_bytes, bool)
+            or not isinstance(metadata_reserve_bytes, int)
+            or metadata_reserve_bytes < 0
+        ):
+            raise ValueError("metadata_reserve_bytes must be a non-negative integer.")
+
+        d, h, experts = self.d_model, self.d_hidden, self.n_experts
+        blocks = self.n_layers + 1
+        vocab = self.vocab_size
+        ceil4 = lambda value: (value + 3) // 4
+
+        total = self.estimated_parameter_count()
+        matrix_parameters = (
+            vocab * d
+            + blocks * (
+                7 * d * d
+                + d * self.kernel_size
+                + d * experts
+                + experts
+                + 2 * experts * d * h
+            )
+        )
+        vector_parameters = total - matrix_parameters
+        if vector_parameters < 0:
+            raise RuntimeError("Packed layout estimate produced a negative vector count.")
+
+        packed_weight_bytes = (
+            vocab * ceil4(d)
+            + blocks * (
+                2 * d * ceil4(d)
+                + d * ceil4(self.kernel_size)
+                + d * ceil4(d)
+                + 4 * d * ceil4(d)
+                + experts * ceil4(d)
+                + experts * (
+                    h * ceil4(d)
+                    + d * ceil4(h)
+                )
+            )
+        )
+        q2_row_count = vocab + blocks * (
+            7 * d + experts * (h + d + 1)
+        )
+        row_scale_bytes = q2_row_count * 4
+        fp16_vector_bytes = vector_parameters * 2
+        return (
+            packed_weight_bytes
+            + row_scale_bytes
+            + fp16_vector_bytes
+            + metadata_reserve_bytes
+        )
+
     def main_receptive_field(self) -> int:
         return 1 + (self.kernel_size - 1) * sum(self.dilations)
