@@ -50,6 +50,8 @@ The native kernel covers dense linear projections only. AArch64/NEON builds use 
 
 The qmini/memory.py module provides an optional local SQLite store. FTS5 indexes note content and tags when available; otherwise search falls back to literal substring matching. Writes happen only through explicit user commands. This subsystem is not a neural memory layer, does not alter model weights and does not grant arbitrary tool execution.
 
+Model weights are immutable during inference. Q-Mini does not perform autonomous online gradient updates or silently rewrite its own parameters after a chat. Persistent notes are retrieved as external context. Actual learning from new curated examples requires a separate supervised fine-tuning run, initialized with `--init-from`, a fresh optimizer and an explicit evaluation cycle.
+
 
 ## Higher-capacity profile
 
