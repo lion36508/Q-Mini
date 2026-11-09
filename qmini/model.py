@@ -416,15 +416,13 @@ class QMiniBlock(nn.Module):
 
 @dataclass
 class QMiniStreamState:
-    """Bounded rolling context plus per-layer incremental inference caches."""
+    """Fixed-size per-layer recurrent caches for incremental inference."""
 
     caches: list[torch.Tensor | None]
     state_spaces: list[torch.Tensor | None]
     thinking_steps: int
     batch_size: int
     tokens_processed: int = 0
-    # Token IDs stay on CPU so rolling-window resets do not pin GPU memory.
-    token_history: torch.Tensor | None = None
 
 
 class QMiniMoE(nn.Module):
@@ -530,12 +528,13 @@ class QMiniMoE(nn.Module):
         state: QMiniStreamState | None = None,
         thinking_steps: int | None = None,
     ) -> tuple[dict[str, Any], QMiniStreamState]:
-        """Run one token with the same hard rolling context as the batch path.
+        """Process one token using fixed-size recurrent caches.
 
-        Streaming inference is inference-only: callers must use torch.no_grad()
-        or torch.inference_mode(). Once the context is full, cached state is
-        rebuilt from the last max_context - 1 token IDs before processing the
-        next token. This drops old SSM state as well as convolution history.
+        max_context limits a batch/prompt prefill. Streaming decode may
+        continue beyond that length: convolution history stays fixed-size and
+        the diagonal SSM carries a learned compressed state forward. This is
+        not exact transcript retrieval, but it avoids replaying the full prompt
+        for every generated token. Callers must disable autograd.
         """
         if self.training:
             raise RuntimeError("Incremental inference requires model.eval().")
@@ -544,64 +543,6 @@ class QMiniMoE(nn.Module):
                 "forward_step is inference-only; wrap streaming calls in "
                 "torch.no_grad() or torch.inference_mode()."
             )
-        if input_ids.ndim == 2 and input_ids.shape[1] == 1:
-            input_ids = input_ids[:, 0]
-        if input_ids.ndim != 1 or input_ids.shape[0] < 1:
-            raise ValueError("forward_step expects token IDs shaped [batch] or [batch, 1].")
-
-        if state is None:
-            state = self.new_stream_state(input_ids.shape[0], thinking_steps)
-        else:
-            if state.batch_size != input_ids.shape[0]:
-                raise ValueError("Streaming state batch size does not match input.")
-            configured_steps = self._resolve_thinking_steps(state.thinking_steps)
-            if thinking_steps is not None and self._resolve_thinking_steps(thinking_steps) != configured_steps:
-                raise ValueError("thinking_steps cannot change in the middle of a stream.")
-
-        total_tokens_processed = state.tokens_processed
-        history = state.token_history
-        if history is not None:
-            if (
-                history.ndim != 2
-                or history.shape[0] != state.batch_size
-                or history.shape[1] > self.config.max_context
-                or history.dtype != torch.long
-                or history.device.type != "cpu"
-            ):
-                raise ValueError("Streaming token history is malformed or belongs to another model.")
-            if history.shape[1] >= self.config.max_context:
-                rolling_prefix = history[:, 1:]
-                rebuilt = self.new_stream_state(
-                    state.batch_size, thinking_steps=state.thinking_steps
-                )
-                for position in range(rolling_prefix.shape[1]):
-                    _, rebuilt = self._forward_step_raw(
-                        rolling_prefix[:, position].to(device=input_ids.device),
-                        state=rebuilt,
-                    )
-                state = rebuilt
-
-        result, next_state = self._forward_step_raw(
-            input_ids, state=state, thinking_steps=thinking_steps
-        )
-        current_ids = input_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1, 1)
-        if history is None:
-            next_history = current_ids
-        else:
-            next_history = torch.cat((history, current_ids), dim=1)
-        next_state.token_history = next_history[:, -self.config.max_context:].contiguous()
-        next_state.tokens_processed = total_tokens_processed + 1
-        return result, next_state
-
-    def _forward_step_raw(
-        self,
-        input_ids: torch.Tensor,
-        state: QMiniStreamState | None = None,
-        thinking_steps: int | None = None,
-    ) -> tuple[dict[str, Any], QMiniStreamState]:
-        """Internal one-token update used to rebuild and advance a rolling cache."""
-        if self.training:
-            raise RuntimeError("Incremental inference requires model.eval().")
         if input_ids.ndim == 2 and input_ids.shape[1] == 1:
             input_ids = input_ids[:, 0]
         if input_ids.ndim != 1 or input_ids.shape[0] < 1:
