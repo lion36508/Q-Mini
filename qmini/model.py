@@ -155,6 +155,7 @@ class CausalGatedDepthwiseConv(nn.Module):
                     self._qmini_packed_weight.detach().cpu().numpy(),
                     self._qmini_weight_scales.detach().cpu().numpy(),
                     self.kernel_size,
+                    format_version=int(getattr(self, "_qmini_q2_version", 2)),
                 )
                 cached = torch.from_numpy(dense).reshape(
                     self.dim, 1, self.kernel_size
