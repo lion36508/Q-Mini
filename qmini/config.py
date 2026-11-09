@@ -254,8 +254,7 @@ class QMiniConfig:
         convolution_bytes = convolution_values * 4 * batch_size
         state_space_layers = self.n_layers + steps if self.use_state_space else 0
         state_space_bytes = state_space_layers * self.d_model * 4 * batch_size
-        rolling_token_bytes = self.max_context * 8 * batch_size
-        return convolution_bytes + state_space_bytes + rolling_token_bytes
+        return convolution_bytes + state_space_bytes
 
     def estimated_cpu_inference_working_set_bytes(
         self,
