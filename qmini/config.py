@@ -164,5 +164,9 @@ class QMiniConfig:
         """Dense-LM planning heuristic only; not a guarantee or sparse-MoE scaling law."""
         return self.estimated_parameter_count() * 20
 
+    def reference_tokens_at_20_per_active_parameter(self) -> int:
+        """Compute-budget heuristic using active Top-1 parameters; not an MoE scaling law."""
+        return self.estimated_unique_active_parameter_count() * 20
+
     def main_receptive_field(self) -> int:
         return 1 + (self.kernel_size - 1) * sum(self.dilations)
