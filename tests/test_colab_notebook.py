@@ -2,6 +2,35 @@ import json
 from pathlib import Path
 
 
+
+def test_colab_setup_preserves_preinstalled_cuda_pytorch():
+    notebook_path = Path(__file__).resolve().parents[1] / "colab" / "QMini_Training.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    setup = "".join(notebook["cells"][2]["source"])
+
+    assert "'--no-deps','-e','.'" in setup
+    assert "from packaging.version import Version" in setup
+    assert "Version('2.10.0')" in setup
+    assert "pyarrow>=15.0" in setup
+    assert "pip','install','-e','.[dev,colab]'" not in setup
+
+
+def test_colab_expensive_stages_fail_closed_without_gpu_and_preflight_memory():
+    notebook_path = Path(__file__).resolve().parents[1] / "colab" / "QMini_Training.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+
+    five_m_stage = "".join(notebook["cells"][7]["source"])
+    long_stage = "".join(notebook["cells"][9]["source"])
+    sft_stage = "".join(notebook["cells"][11]["source"])
+
+    assert "if not torch.cuda.is_available():" in five_m_stage
+    assert "if not torch.cuda.is_available():" in long_stage
+    assert "torch.cuda.mem_get_info(0)" in long_stage
+    assert "LONG_MIN_FREE_GPU_GIB = 8.0" in long_stage
+    assert "if not torch.cuda.is_available():" in sft_stage
+    assert "torch.cuda.mem_get_info(0)" in sft_stage
+    assert "LONG_TARGET_TOKENS_OVERRIDE must be a positive integer or None." in long_stage
+
 def test_colab_long_training_has_no_fixed_optimizer_step_cap():
     notebook_path = Path(__file__).resolve().parents[1] / "colab" / "QMini_Training.ipynb"
     notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
