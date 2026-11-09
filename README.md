@@ -30,7 +30,7 @@ These are **training and product objectives**, not claims that the current rando
 3. **Causal sequence processing.** A token at a future position must never influence an earlier position. The sequence mixer is a left-padded causal 1D depthwise convolution. This is a text-sequence operation, not an image CNN.
 4. **From-scratch training.** Do not silently load or fine-tune third-party pretrained model weights. The tokenizer is trained locally from the selected corpus.
 5. **Sparse expert computation.** Use learned Top-1 routing across the configured feed-forward experts in the current baseline; monitor expert usage rather than assuming specialization.
-6. **Low-bit research path.** Use quaternary weights and INT8 fake-quantized activations with an STE during model training. Clearly distinguish fake quantization, packed storage and true integer inference.
+6. **Strict Q2 model weights.** Production matrix weights use exactly {-1.0, -0.5, +0.5, +1.0}, with two bits per weight. INT8 fake-quantized activations are separate. Clearly distinguish FP32 QAT master weights, Q2 packed storage and actual integer inference.
 7. **Reproducible development.** Version architecture/configuration, test causal behavior, record data provenance, keep evaluation data held out and report actual parameter counts and runtime measurements.
 8. **Free/open-source-first development.** Prefer open-source libraries and local execution. Do not make a paid hosted API or proprietary model service a required dependency.
 
@@ -50,14 +50,14 @@ The original compact convolution-only baseline remains available. New hybrid res
 | Convolution kernel width | 10 |
 | Convolution dilations | 1, 2, 4, 8, 16, 32 |
 | Shared refinement | One block reused for 1–4 passes |
-| Weight alphabet | {-2, -1, +1, +2} |
+| Q2 normalized weight codebook | {-1.0, -0.5, +0.5, +1.0} |
 | Activation quantization | Per-token AbsMax INT8 fake quantization |
 
 ### Forward path
 
 ~~~text
 Token IDs
-  -> Quaternary token embedding
+   -> Q2 token embedding
   -> Six Q-Mini causal blocks
        -> RMSNorm
        -> Quantized content/gate projection
@@ -92,21 +92,19 @@ The compact configs/qmini_base.json profile is retained for CPU smoke tests and 
 | Convolution kernel | 10 |
 | Dilations | 1 through 512, powers of two |
 | Shared refinement | 1–4 passes |
-| Weight alphabet | {-2, -1, +1, +2} |
+| Q2 normalized weight codebook | {-1.0, -0.5, +0.5, +1.0} |
 
 At the full 8,192-token vocabulary the historical convolution-only shape has **134,426,200 parameters**, including its single shared refinement block. The audit command and CI assert the instantiated count; if the locally trained tokenizer produces a smaller vocabulary, the active config and actual count are correspondingly smaller. This is a 134M-class research model, not a claim of state-of-the-art assistant quality. That depends on corpus quality, tokens seen, training compute and held-out capability evaluation.
 
-### Quantization — what it does and does not mean
+### Quantization — fixed production Q2-v2 format
 
-- Trainable master weights remain FP32 and are mapped to {-2, -1, +1, +2} during the fake-quantized forward pass using a straight-through estimator.
-- Activations use per-token AbsMax INT8 fake quantization, also with an STE.
-- Export packs four 2-bit weight codes per byte and stores row scales; selected metadata tensors are stored separately.
-- FP32 master weights, gradients and optimizer states are still used during ordinary training. The small packed archive size is **not** the training RAM requirement.
-- The C++17 kernel is now wired into `QLinear` and the tied language-model output projection for CPU evaluation/inference when `qmini/libqmini_kernel.so` is present. It consumes per-token INT8 activations and packed quaternary weights, using integer accumulation in the native inner loop. If the library is absent, Q-Mini transparently uses the PyTorch reference path.
-- The causal depthwise convolution, RMSNorm, embedding lookup and sparse dispatch are still executed by PyTorch. This is a hybrid native/PyTorch CPU path, not a complete integer-only model runtime.
-- The packed NPZ archive remains a storage/export format; direct execution from that archive is not yet implemented. Reference model loading still uses `model.pt`.
-
-The shared refinement block is a learned hidden-state update that reuses parameters. It is not a symbolic theorem prover and does not guarantee correct reasoning. More refinement passes increase inference compute and must be evaluated.
+- Production matrix weights use exactly the four normalized symbols {-1.0, -0.5, +0.5, +1.0}; each symbol is stored in exactly two bits.
+- Each output row uses FP32 scale = 2 × mean(abs(original row)); effective weight = normalized symbol × row scale. A fully zero row has scale 0 and remains exactly zero. In a nonzero row, an exact-zero source entry maps to +0.5 × row scale because the production codebook has no zero symbol.
+- QAT keeps FP32 master parameters and optimizer state with an STE. This is training state, not the deployed matrix-weight format. New packed exports store matrix symbols at two bits each, plus separately stored FP32 row scales and FP16 one-dimensional vectors.
+- Activations use per-token AbsMax signed INT8 fake quantization. INT8 activations do not widen matrix weights.
+- New archives use Q2-v2. Legacy Q2-v1 archives decode with their original symbol and scale semantics; contradictory Q2-v2 codebook metadata is rejected.
+- The native C++ projection is a versioned INT8-by-Q2 kernel. It is a projection primitive, not a complete native model graph.
+- Causal depthwise convolution, RMSNorm, embedding lookup and sparse dispatch still include PyTorch operations; the packed runtime is hybrid, not fully integer-only.
 
 ## 4. Implemented now vs. intended later
 
@@ -119,7 +117,7 @@ The shared refinement block is a learned hidden-state update that reuses paramet
 | Data | Local BPE tokenizer and text/chat data readers | Larger curated, deduplicated, licensed and balanced corpora |
 | Training | AdamW, gradient accumulation, available mixed precision, assistant-only loss masks for structured chat/Q&A, evaluation and fingerprinted resumable checkpoints | Longer curriculum training and measured instruction tuning |
 | Experts | Sparse Top-1 MoE and router/load statistics | Verified useful specialization without expert collapse |
-| Quantization | Quaternary/INT8 fake quantization and packed export | Calibrated, numerically verified low-bit execution |
+| Quantization | Q2-v2 four-level matrix weights, INT8 activations and packed export | Measured Q2 quality, speed and memory on trained checkpoints/device |
 | Memory | Opt-in local SQLite memory with FTS5 search, explicit save/recall/delete and JSON export | Improve retrieval and add user-controlled import/backup workflows |
 | Tools/tasks | CLI for project operations; no model-controlled general tool executor | Permission-gated registered tools for carefully scoped tasks |
 | Mobile | Standalone C++ projection primitive | Complete ARM64 runtime, integrated kernels and measured on-device inference |
@@ -184,7 +182,7 @@ Model-directed task execution remains a future, permission-controlled extension.
 
 **Development and training:** GitHub is the source of truth for code, configuration, tests and documentation. Google Colab is the GPU training environment. Google Drive is the recommended location for datasets, tokenizer artifacts, token streams, checkpoints, logs and model exports.
 
-**Local CPU inference:** the hybrid path uses the C++17 packed-quaternary × INT8 projection kernel when the shared library is available; AArch64/NEON builds use vector widening multiply and integer accumulation, while other architectures use the scalar integer fallback. The convolution, RMSNorm, embedding lookup and sparse dispatch remain PyTorch. The benchmark script reports the selected projection backend; performance must be measured on each target phone.
+**Local CPU inference:** the hybrid path uses the versioned C++17 packed-Q2-v2 × INT8 projection kernel when a compatible shared library is available; AArch64/NEON builds use vector widening multiply and integer accumulation, while other architectures use the scalar integer fallback. The convolution, RMSNorm, embedding lookup and sparse dispatch remain PyTorch. The benchmark script reports the selected projection backend; performance must be measured on each target phone.
 
 **Android ARM64 / Termux:** the current native projection source has an AArch64/NEON compile path and CI cross-compiles it. A complete offline runtime still requires native embedding lookup, causal depthwise convolution, RMSNorm, sparse expert dispatch, output handling and tokenizer integration, plus differential tests and real-device benchmarks. CI cross-compilation is not an Android phone performance benchmark. This repository does not currently build an APK or complete Android runtime.
 
@@ -225,14 +223,14 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 
 - QMINI_MASTER.py — single project entry point.
 - qmini/model.py — causal-convolution MoE model.
-- qmini/quantization.py — STE fake quantization and quaternary packing.
+- qmini/quantization.py — Q2-v2 four-level STE fake quantization and two-bit packing; alternate quantizers are diagnostic-only.
 - qmini/tokenizer.py, qmini/data.py — local tokenizer and corpus pipeline.
 - qmini/train.py — training, validation and resumable checkpoints.
 - qmini/generate.py — cached autoregressive generation and terminal chat.
 - qmini/evaluate.py — held-out language-model and prompt/reference evaluation.
 - qmini/export.py — packed archive export and verification.
 - qmini/memory.py — opt-in local SQLite/FTS5 memory with explicit CRUD and JSON export.
-- qmini/native_kernel.cpp, qmini/native.py — packed INT8/quaternary CPU projection, AArch64/NEON path, scalar fallback and backend detection.
+- qmini/native_kernel.cpp, qmini/native.py — packed INT8-by-Q2 CPU projection, AArch64/NEON path, scalar fallback and versioned Q2 ABI detection.
 - scripts/benchmark.py — repeatable full-forward, streaming prefill and cached autoregressive decode benchmark.
 - configs/ — compact base, 5M, historical 134M, hybrid 152M, 5B capacity and smoke configurations.
 - tests/ — model, causality, quantization, data, training, export and native tests.
@@ -259,7 +257,7 @@ The notebook and CLI contain the tokenizer, data preparation, training, resume, 
 The new hybrid model path is:
 
 ```text
-Token IDs -> Quaternary Embedding
+Token IDs -> Q2 Embedding
   -> [RMSNorm -> Gated Causal Depthwise Conv -> Residual
       -> RMSNorm -> Gated Diagonal State-Space Memory -> Residual
       -> RMSNorm -> Sparse Top-1 MoE -> Residual] x N
@@ -348,9 +346,7 @@ The notebook now defaults to a small, reproducible learning-proof run: fixed-see
 
 ## Experimental quantization ablation
 
-\`scripts/quantization_ablation.py\` compares Q2, zero-preserving ternary and groupwise INT4 reconstruction against FP16 using either a Q-Mini final model or the Q-Mini run's own \`latest.pt\`. This is a weight-error experiment only; the Q2 production format remains unchanged until full held-out NLL, task quality, memory and speed comparisons are measured.
-
-
+`scripts/quantization_ablation.py` compares Q2-v2 reconstruction against an FP16 reference and optional rowwise INT8, ternary and groupwise INT4 diagnostic references using only Q-Mini-owned weights/checkpoints. Those alternate formats are measurement baselines only; they are not production model, export or inference formats. The script measures weight reconstruction error, not held-out NLL, assistant quality, latency or peak RAM.
 
 ## Production Q2-v2 format contract
 
