@@ -76,3 +76,16 @@ The planner's 1.409 GB CPU working-set estimate for batch 1 is not a measured pr
 ## Metric aggregation
 
 Report token-weighted negative log-likelihood, not an arithmetic mean of batch-level means. For masked conversation data, sum each supervised response token's cross-entropy and divide by the total supervised response-token count across the entire evaluation stream. Log that count alongside validation loss and perplexity. The periodic training evaluator and standalone \`eval-lm\` use this same definition.
+
+
+
+## Structured task-file scoring
+
+The JSONL task evaluator accepts an optional \`language\`, \`scorer\` and \`tolerance\` per example. Supported scorer values are:
+- \`lexical\`: normalized Unicode exact match;
+- \`numeric\`: exactly one finite numeric answer, compared with absolute tolerance;
+- \`json\`: parsed JSON values must be structurally equal;
+- \`contains\`: normalized reference text must occur in the prediction.
+
+Reports include per-category and per-language task-pass rates, Wilson 95% confidence intervals, lexical diagnostics, and case-level scoring errors. These are useful objective checks for well-specified tasks; they do not by themselves establish factuality, safety, general reasoning or code quality. Code-generation claims still require a separate constrained test harness with independently reviewed test cases.
+
