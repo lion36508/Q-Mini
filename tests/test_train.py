@@ -1,3 +1,4 @@
+import hashlib
 import json
 import numpy as np
 import pytest
@@ -61,7 +62,7 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
         assert record["eval_supervised_tokens"] > 0
         assert sum(record["thinking_step_sampling_counts"].values()) == record["step"]
 
-    train_model(
+    final = train_model(
         tiny_config, train_bin, valid_bin, run,
         steps=3, batch_size=1, seq_len=8, grad_accum=1,
         eval_every=1, save_every=1, eval_batches=1,
@@ -76,6 +77,16 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
     assert report["tensor_count"] == len(resumed["model"])
     assert report["parameter_count"] == sum(value.numel() for value in resumed["model"].values())
     assert (final / "model_manifest.json").is_file()
+    manifest = json.loads(
+        (final / "model_manifest.json").read_text(encoding="utf-8")
+    )
+    packed_path = final / manifest["packed_export"]
+    dense_path = final / "model.pt"
+    assert manifest["format"] == "qmini-final-model-v2"
+    assert manifest["packed_export_bytes"] == packed_path.stat().st_size
+    assert manifest["packed_export_sha256"] == hashlib.sha256(packed_path.read_bytes()).hexdigest()
+    assert manifest["dense_snapshot_bytes"] == dense_path.stat().st_size
+    assert manifest["dense_snapshot_sha256"] == hashlib.sha256(dense_path.read_bytes()).hexdigest()
 
 
 def test_resume_rejects_changed_training_data(tiny_config, tmp_path):
