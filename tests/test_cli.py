@@ -112,3 +112,65 @@ def test_eval_conversations_cli_routes_through_structured_evaluator(
     assert called["args"][2] == str(tmp_path / "conversations.jsonl")
     assert called["report"] is expected_report
     assert called["output"] == str(tmp_path / "report.json")
+
+
+
+def test_distributed_plan_is_labeled_hypothetical_and_uses_shard_lower_bound(
+    monkeypatch, capsys
+):
+    import json
+    import sys
+
+    from qmini.config import QMiniConfig
+
+    config_path = "configs/qmini_5b.json"
+    config = QMiniConfig.from_json(config_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qmini", "plan",
+            "--config", config_path,
+            "--world-size", "4",
+            "--sharding-scenario", "fsdp-full-shard",
+        ],
+    )
+    assert cli.main() == 0
+    report = json.loads(capsys.readouterr().out)
+
+    expected_total = config.estimated_adamw_training_state_bytes()
+    assert report["fp32_adamw_state_lower_bound_bytes"] == expected_total
+    assert report["sharding_scenario"] == "fsdp-full-shard"
+    assert report["world_size"] == 4
+    assert report["ideal_fully_sharded_fp32_adamw_state_lower_bound_per_rank_bytes"] == (
+        (expected_total + 3) // 4
+    )
+    assert report["distributed_training_implemented"] is False
+    assert "Hypothetical lower bound only" in report["sharded_estimate_warning"]
+
+
+def test_distributed_plan_rejects_ambiguous_world_size_and_invalid_rank_count(
+    monkeypatch
+):
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["qmini", "plan", "--config", "configs/qmini_5b.json", "--world-size", "4"],
+    )
+    with pytest.raises(SystemExit, match="requires an explicit sharding scenario"):
+        cli.main()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qmini", "plan",
+            "--config", "configs/qmini_5b.json",
+            "--world-size", "0",
+            "--sharding-scenario", "zero3",
+        ],
+    )
+    with pytest.raises(SystemExit, match="world-size must be positive"):
+        cli.main()
