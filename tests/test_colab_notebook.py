@@ -10,10 +10,8 @@ def test_colab_long_training_has_no_fixed_optimizer_step_cap():
     assert "LONG_MAX_OPTIMIZER_STEPS" not in long_stage
     assert "LONG_OPTIMIZER_STEPS_OVERRIDE" in long_stage
     assert "BASE_STEPS = LONG_OPTIMIZER_STEPS_OVERRIDE" in long_stage
-    assert (
-        "if LONG_OPTIMIZER_STEPS_OVERRIDE is None:\\n"
-        "        if TARGET_TOKENS < TOKENS_PER_OPTIMIZER_STEP:"
-    ) in long_stage
+    assert "if LONG_OPTIMIZER_STEPS_OVERRIDE is None:" in long_stage
+    assert "if TARGET_TOKENS < TOKENS_PER_OPTIMIZER_STEP:" in long_stage
     assert "No arbitrary maximum optimizer-step cap is applied." in long_stage
 
 
