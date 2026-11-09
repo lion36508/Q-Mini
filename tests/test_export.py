@@ -1,3 +1,4 @@
+import json
 import numpy as np
 from qmini.export import export_packed_state, reconstruct_packed_state, verify_packed_export
 from qmini.model import QMiniMoE
@@ -11,6 +12,15 @@ def test_packed_export_roundtrip_matches_quaternary_projection(tiny_config, tmp_
     )
     config, restored = reconstruct_packed_state(target)
     assert config.to_dict() == tiny_config.to_dict()
+    with np.load(target, allow_pickle=False) as archive:
+        metadata = json.loads(str(archive["metadata_json"].item()))
+    assert metadata["format"] == "qmini-packed-v2"
+    assert metadata["q2_contract"] == {
+        "version": 2,
+        "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+        "row_scale": "2 * mean(abs(original_output_row))",
+        "all_zero_row_scale": 0.0,
+    }
     original = model.state_dict()
     assert set(restored) == set(original)
 
@@ -25,6 +35,8 @@ def test_packed_export_roundtrip_matches_quaternary_projection(tiny_config, tmp_
             ), name
 
     report = verify_packed_export(target)
+    assert report["format"] == "qmini-packed-v2"
+    assert report["q2_version"] == 2
     assert report["tensor_count"] == len(original)
     assert report["parameter_count"] == sum(t.numel() for t in original.values())
     assert report["context"] == tiny_config.max_context
