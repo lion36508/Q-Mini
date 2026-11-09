@@ -51,10 +51,10 @@ def _try_native_linear(
     ):
         return None
 
-    from .native import get_native_kernel
+    from .native import get_native_kernel, native_kernel_should_be_used
 
     kernel = get_native_kernel()
-    if kernel is None:
+    if not native_kernel_should_be_used(kernel):
         return None
 
     key = _cache_key(weight)
