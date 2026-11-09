@@ -111,3 +111,12 @@ def test_incremental_step_count_cannot_change_mid_stream(tiny_config):
         _, state = model.forward_step(torch.tensor([1]), thinking_steps=1)
         with pytest.raises(ValueError, match="cannot change"):
             model.forward_step(torch.tensor([2]), state=state, thinking_steps=2)
+
+def test_non_integer_token_ids_are_rejected(tiny_config):
+    model = QMiniMoE(tiny_config)
+    with pytest.raises(TypeError, match="integer tensor dtype"):
+        model(torch.tensor([[1.0, 2.0]]))
+
+    model.eval()
+    with torch.inference_mode(), pytest.raises(TypeError, match="integer tensor dtype"):
+        model.forward_step(torch.tensor([1.0]))
