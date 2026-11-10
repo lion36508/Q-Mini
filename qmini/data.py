@@ -783,7 +783,7 @@ def build_source_provenance(
             if (
                 license_value.casefold() in {"unknown", "unlicensed", "none", "n/a"}
                 or not re.fullmatch(
-                    r"[A-Za-z0-9][A-Za-z0-9.+-]*(?:\\s+(?:AND|OR|WITH)\\s+[A-Za-z0-9][A-Za-z0-9.+-]*)*",
+                    r"[A-Za-z0-9][A-Za-z0-9.+-]*(?:\s+(?:AND|OR|WITH)\s+[A-Za-z0-9][A-Za-z0-9.+-]*)*",
                     license_value,
                 )
             ):
