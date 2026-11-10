@@ -307,10 +307,10 @@ def _make_fingerprinted_q2_model_bundle(tiny_config, root):
     root.mkdir()
     corpus = root / "corpus.txt"
     corpus.write_text(
-        "Document one: A packed language model predicts the next token.\\n\\n"
-        "Document two: Independent validation data measures generalization.\\n\\n"
-        "Document three: Safe checkpoints preserve exact model provenance.\\n"
-        "Document four: Causal sequence models process tokens from left to right.\\n",
+        "Document one: A packed language model predicts the next token.\n\n"
+        "Document two: Independent validation data measures generalization.\n\n"
+        "Document three: Safe checkpoints preserve exact model provenance.\n"
+        "Document four: Causal sequence models process tokens from left to right.\n",
         encoding="utf-8",
     )
     tokenizer_path = root / "tokenizer.json"
