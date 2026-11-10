@@ -585,6 +585,39 @@ def _verify_prepared_dataset_manifest(
             raise ValueError(
                 "Tokenizer and prepared dataset use different near-duplicate thresholds."
             )
+        expected_provenance = manifest.get("source_provenance_sha256")
+        sidecar_provenance = sidecar.get("source_provenance_sha256")
+        if expected_provenance is not None and sidecar_provenance != expected_provenance:
+            raise ValueError(
+                "Tokenizer and prepared dataset source provenance hashes differ."
+            )
+
+    if manifest.get("release_mode") is True:
+        provenance_hash = manifest.get("source_provenance_sha256")
+        source_files = manifest.get("source_files")
+        if (
+            not isinstance(provenance_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", provenance_hash)
+            or not isinstance(source_files, list)
+            or not source_files
+        ):
+            raise ValueError("Release dataset manifest is missing a valid source provenance record.")
+        if not tokenizer_sidecar.is_file():
+            raise ValueError("Release training requires a release-mode tokenizer manifest.")
+        if sidecar.get("release_mode") is not True:
+            raise ValueError("Release training requires tokenizer fitting with --release-mode.")
+        for source in source_files:
+            if not isinstance(source, dict):
+                raise ValueError("Release dataset source provenance entries must be objects.")
+            required = (
+                "source_name", "source_uri", "license_spdx", "collected_at",
+                "language", "transformation_version", "sha256", "size_bytes",
+                "document_count",
+            )
+            if any(source.get(key) in (None, "", "UNKNOWN", "unknown") for key in required):
+                raise ValueError("Release dataset contains incomplete or unknown source provenance.")
+            if str(source["license_spdx"]).casefold() in {"unknown", "unlicensed", "none", "n/a"}:
+                raise ValueError("Release dataset contains an unknown or unapproved source license.")
 
     artifacts = [
         ("train_tokens_sha256", train_file, "Training token stream"),
@@ -634,6 +667,7 @@ def _resume_contract(
     weight_decay: float,
     seed: int,
     initial_model_path: str | Path | None = None,
+    dataset_manifest_path: str | Path | None = None,
 ) -> dict[str, Any]:
     train_file = Path(train_path).resolve()
     valid_file = Path(valid_path).resolve()
@@ -645,7 +679,7 @@ def _resume_contract(
         _sha256_file(tokenizer_path) if tokenizer_path is not None and Path(tokenizer_path).is_file()
         else None
     )
-    return {
+    contract = {
         "train": train_fingerprint,
         "validation": valid_fingerprint,
         "train_loss_mask": _sha256_file(train_mask_path) if train_mask_path else None,
@@ -666,6 +700,9 @@ def _resume_contract(
             if initial_model_path is not None else None
         ),
     }
+    if dataset_manifest_path is not None:
+        contract["dataset_manifest"] = _sha256_file(dataset_manifest_path)
+    return contract
 
 
 def _reconcile_metrics(path: Path, checkpoint_step: int) -> None:
@@ -811,7 +848,7 @@ def train_model(
         _verify_initial_brain_artifact(initial_brain_path, config)
     train_tokens = _load_tokens(train_bin, "Training")
     valid_tokens = _load_tokens(valid_bin, "Validation")
-    _verify_prepared_dataset_manifest(
+    dataset_manifest_path = _verify_prepared_dataset_manifest(
         train_bin, valid_bin, tokenizer_path,
         train_mask_bin, valid_mask_bin, config.vocab_size,
     )
@@ -840,6 +877,7 @@ def train_model(
         train_bin, valid_bin, tokenizer_path, train_mask_bin, valid_mask_bin,
         batch_size, seq_len, grad_accum, learning_rate, weight_decay, actual_seed,
         initial_source_path,
+        dataset_manifest_path=dataset_manifest_path,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
