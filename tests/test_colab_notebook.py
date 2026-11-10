@@ -100,7 +100,11 @@ def test_colab_runs_random_brain_architecture_preflight_before_dataset_loading()
     assert "qmini.cli','preflight'" in preflight
     assert "qmini_research_152m.json" in preflight
     assert "'--sequence-length','8'" in preflight
-    assert "'--device','cuda'" in preflight
+    assert "if torch.cuda.is_available():" in preflight
+    assert "qmini_research_152m.json" in preflight
+    assert "qmini_smoke.json" in preflight
+    assert "PREFLIGHT_DEVICE = 'cpu'" in preflight
+    assert "'--device',PREFLIGHT_DEVICE" in preflight
     assert "optimizer step" in preflight
     assert "weights updated" in preflight
     assert "qmini.cli','tokenizer'" in tokenizer_data_stage
