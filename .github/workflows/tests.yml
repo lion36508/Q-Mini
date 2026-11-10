@@ -62,6 +62,19 @@ jobs:
           PY
       - name: Run tests
         run: pytest -q
+      - name: Prove random-initialized Q-Mini can learn
+        run: |
+          python scripts/learning_proof.py \
+            --config configs/qmini_smoke.json \
+            --output-dir /tmp/qmini-learning-proof \
+            --steps 80 \
+            --minimum-nll-improvement 0.15
+      - name: Upload controlled learning proof
+        uses: actions/upload-artifact@v7
+        with:
+          name: qmini-learning-proof
+          path: /tmp/qmini-learning-proof/learning-proof.json
+          if-no-files-found: error
       - name: Audit FP32 and low-precision source paths
         run: |
           python scripts/precision_audit.py \
