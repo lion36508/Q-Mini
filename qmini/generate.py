@@ -39,6 +39,55 @@ def load_model(model_dir: str | Path, device: str | None = None):
         if not isinstance(manifest, dict):
             raise ValueError("Model manifest must contain a JSON object.")
 
+    # Versioned final-model bundles bind config, parameters, packed export and
+    # optional dense snapshot together. Never accept a merely decodable archive
+    # as the intended checkpoint when its manifest fingerprint disagrees.
+    is_final_v2 = manifest is not None and manifest.get("format") == "qmini-final-model-v2"
+    if is_final_v2:
+        try:
+            manifest_config = QMiniConfig.from_dict(manifest.get("config"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Final-model manifest has an invalid Q-Mini config.") from exc
+        if manifest_config.to_dict() != config.to_dict():
+            raise ValueError("Final-model manifest config does not match config.json.")
+        if manifest.get("parameters") != config.estimated_parameter_count():
+            raise ValueError("Final-model manifest parameter count does not match config.")
+        if (
+            manifest.get("matrix_weight_format") != "qmini-packed-v2"
+            or manifest.get("matrix_weight_bits") != 2
+        ):
+            raise ValueError("Final-model manifest does not declare the Q2-v2 two-bit contract.")
+
+        packed_name = manifest.get("packed_export")
+        if (
+            not isinstance(packed_name, str)
+            or not packed_name
+            or Path(packed_name).name != packed_name
+            or packed_name != packed_path.name
+        ):
+            raise ValueError("Final-model manifest has an invalid packed-export filename.")
+        if not packed_path.is_file():
+            raise FileNotFoundError("Final-model manifest references a missing packed Q2-v2 export.")
+        packed_fingerprint = _sha256_file(packed_path)
+        if (
+            manifest.get("packed_export_bytes") != packed_path.stat().st_size
+            or manifest.get("packed_export_sha256") != packed_fingerprint
+        ):
+            raise ValueError("Packed Q2-v2 export size/SHA-256 does not match the final-model manifest.")
+
+        dense_included = manifest.get("dense_training_snapshot_included")
+        if not isinstance(dense_included, bool):
+            raise ValueError("Final-model manifest must declare dense_training_snapshot_included.")
+        if dense_included:
+            if not dense_path.is_file():
+                raise FileNotFoundError("Final-model manifest declares a missing dense model.pt snapshot.")
+            dense_fingerprint = _sha256_file(dense_path)
+            if (
+                manifest.get("dense_snapshot_bytes") != dense_path.stat().st_size
+                or manifest.get("dense_snapshot_sha256") != dense_fingerprint
+            ):
+                raise ValueError("Dense model.pt size/SHA-256 does not match the final-model manifest.")
+
     # A dense legacy snapshot is trusted only when the current manifest
     # explicitly fingerprints it. If both files exist but the manifest says
     # Q2-only, never let an old model.pt silently override the packed export.
