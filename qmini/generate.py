@@ -14,22 +14,68 @@ from .tokenizer import load_tokenizer, special_token_id
 from .text import escape_special_token_literals
 
 
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def load_model(model_dir: str | Path, device: str | None = None):
     root = Path(model_dir)
     config = QMiniConfig.from_json(root / "config.json")
     requested_device = torch.device(device) if device is not None else None
     packed_path = root / "model.qmini.npz"
-
-    # Prefer the true packed runtime when CPU was requested or when the large
-    # deployment has no dense snapshot. Keep small/GPU research runs on CUDA
-    # when a dense snapshot is available.
     dense_path = root / "model.pt"
+    model_manifest_path = root / "model_manifest.json"
+
+    manifest = None
+    if model_manifest_path.is_file():
+        try:
+            manifest = json.loads(model_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Could not read model manifest: {model_manifest_path}") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError("Model manifest must contain a JSON object.")
+
+    # A dense legacy snapshot is trusted only when the current manifest
+    # explicitly fingerprints it. If both files exist but the manifest says
+    # Q2-only, never let an old model.pt silently override the packed export.
+    if manifest is not None:
+        dense_snapshot_available = False
+        if (
+            manifest.get("format") == "qmini-final-model-v2"
+            and manifest.get("dense_training_snapshot_included") is True
+            and dense_path.is_file()
+        ):
+            dense_snapshot_available = (
+                manifest.get("dense_snapshot_bytes") == dense_path.stat().st_size
+                and manifest.get("dense_snapshot_sha256") == _sha256_file(dense_path)
+            )
+    else:
+        # Backward compatibility for standalone legacy model.pt bundles.
+        # When a packed artifact is also present without provenance, prefer Q2.
+        dense_snapshot_available = dense_path.is_file() and not packed_path.is_file()
+
+    if (
+        requested_device is not None
+        and requested_device.type != "cpu"
+        and packed_path.is_file()
+        and not dense_snapshot_available
+    ):
+        raise RuntimeError(
+            "The packed Q2-v2 inference runtime is CPU-only. Refusing to expand "
+            "2-bit matrix weights into dense FP32 tensors for an explicit "
+            f"{requested_device.type} request. Use device='cpu' or provide a "
+            "separately verified legacy dense snapshot."
+        )
+
     use_packed = packed_path.is_file() and (
         (requested_device is not None and requested_device.type == "cpu")
-        or (
-            requested_device is None
-            and (not torch.cuda.is_available() or not dense_path.is_file())
-        )
+        or (requested_device is None and (
+            not torch.cuda.is_available() or not dense_snapshot_available
+        ))
     )
     if use_packed:
         from .packed_runtime import load_packed_model
@@ -39,33 +85,24 @@ def load_model(model_dir: str | Path, device: str | None = None):
         target = requested_device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
-        model = QMiniMoE(config)
-        weights_path = dense_path
-        if not weights_path.is_file():
+        if not dense_snapshot_available:
             raise FileNotFoundError(
-                f"No compatible weights found. Expected {packed_path} for CPU packed "
-                f"inference or {weights_path} for dense PyTorch inference."
+                f"No verified compatible weights found. Expected the packed Q2-v2 "
+                f"artifact {packed_path} for CPU inference or a fingerprinted "
+                f"legacy dense snapshot at {dense_path}."
             )
+        model = QMiniMoE(config)
         # Model files are tensor-only artifacts; never use unrestricted pickle.
-        state = torch.load(weights_path, map_location="cpu", weights_only=True)
+        state = torch.load(dense_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state, strict=True)
         model.to(target).eval()
 
     tokenizer_path = root / "tokenizer.json"
     tokenizer = load_tokenizer(tokenizer_path)
-    model_manifest_path = root / "model_manifest.json"
-    if model_manifest_path.is_file():
-        try:
-            manifest = json.loads(model_manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"Could not read model manifest: {model_manifest_path}") from exc
+    if manifest is not None:
         expected_tokenizer_hash = manifest.get("tokenizer_sha256")
         if expected_tokenizer_hash:
-            digest = hashlib.sha256()
-            with tokenizer_path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != expected_tokenizer_hash:
+            if _sha256_file(tokenizer_path) != expected_tokenizer_hash:
                 raise ValueError(
                     "Tokenizer SHA-256 differs from the tokenizer used for training. "
                     "Restore the matching tokenizer.json for this model."
@@ -76,7 +113,6 @@ def load_model(model_dir: str | Path, device: str | None = None):
             f"model config ({config.vocab_size})."
         )
     return model, tokenizer, target
-
 
 def _sample_next_token(
     logits: torch.Tensor,

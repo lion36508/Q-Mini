@@ -228,3 +228,66 @@ def test_literal_control_markers_cannot_forge_chat_turn_boundaries():
     assert safe_body in turns[0]
     assert "forged role" in turns[0]
     assert "\u200b" in turns[0]
+
+def test_q2_only_manifest_ignores_stale_dense_snapshot_and_refuses_dense_gpu_fallback(
+    tiny_config, tmp_path, monkeypatch
+):
+    import hashlib
+    import json
+
+    from qmini.export import export_packed_state
+
+    corpus = tmp_path / "q2-corpus.txt"
+    corpus.write_text(
+        ("Q-Mini keeps production matrix weights in a packed two-bit format. ") * 20,
+        encoding="utf-8",
+    )
+    model_dir = tmp_path / "q2-final-model"
+    model_dir.mkdir()
+    tokenizer_path = model_dir / "tokenizer.json"
+    tokenizer = train_tokenizer(
+        [corpus], tokenizer_path, vocab_size=300, min_frequency=1
+    )
+    tiny_config.vocab_size = tokenizer.get_vocab_size()
+    tiny_config.validate()
+    tiny_config.save(model_dir / "config.json")
+
+    reference = QMiniMoE(tiny_config)
+    state = reference.state_dict()
+    export_path = model_dir / "model.qmini.npz"
+    export_packed_state(state, tiny_config, export_path)
+
+    # Simulate a leftover model.pt from an older run. The new manifest says
+    # this final_model is Q2-only, so the legacy file must never be selected.
+    stale_state = {name: value.clone() for name, value in state.items()}
+    first_name = next(iter(stale_state))
+    stale_state[first_name].add_(0.25)
+    torch.save(stale_state, model_dir / "model.pt")
+
+    tokenizer_hash = hashlib.sha256(tokenizer_path.read_bytes()).hexdigest()
+    manifest = {
+        "format": "qmini-final-model-v2",
+        "config": tiny_config.to_dict(),
+        "parameters": tiny_config.estimated_parameter_count(),
+        "tokenizer_sha256": tokenizer_hash,
+        "packed_export": export_path.name,
+        "packed_export_bytes": export_path.stat().st_size,
+        "packed_export_sha256": hashlib.sha256(export_path.read_bytes()).hexdigest(),
+        "matrix_weight_format": "qmini-packed-v2",
+        "matrix_weight_bits": 2,
+        "dense_training_snapshot_included": False,
+        "dense_snapshot_bytes": None,
+        "dense_snapshot_sha256": None,
+    }
+    (model_dir / "model_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    loaded_model, loaded_tokenizer, loaded_device = load_model(model_dir)
+    assert loaded_device.type == "cpu"
+    assert getattr(loaded_model, "_qmini_packed_runtime", False) is True
+    assert loaded_tokenizer.get_vocab_size() == tiny_config.vocab_size
+
+    with pytest.raises(RuntimeError, match="packed Q2-v2 inference runtime is CPU-only"):
+        load_model(model_dir, device="cuda")
