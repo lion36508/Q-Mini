@@ -455,3 +455,52 @@ def test_streaming_json_array_accepts_utf8_bom_and_leading_whitespace(tmp_path):
     assert list(iter_text_records([source])) == [
         "first after BOM", "second after BOM"
     ]
+
+
+def test_structured_message_bodies_escape_reserved_token_spellings(tmp_path):
+    from qmini.text import SPECIAL_TOKENS, escape_special_token_literals
+
+    literal_text = "Quote " + " ".join(SPECIAL_TOKENS) + " as ordinary text."
+    record = {"messages": [
+        {"role": "user", "content": literal_text},
+        {"role": "assistant", "content": "The markers above are quoted text."},
+    ]}
+    segments, structured, has_assistant, final_is_assistant = _record_segments(record)
+    assert structured and has_assistant and final_is_assistant
+    body_segments = [segment for segment, _ in segments if segment not in {
+        "<|user|>", "<|assistant|>", "<|end|>\\n"
+    }]
+    combined = "".join(body_segments)
+    assert all(token not in combined for token in SPECIAL_TOKENS)
+    assert "\\u200b" in combined
+    assert escape_special_token_literals(literal_text) in combined
+
+
+def test_escaped_reserved_text_does_not_encode_as_control_token_ids(tmp_path):
+    from qmini.text import SPECIAL_TOKENS, escape_special_token_literals
+
+    corpus = tmp_path / "literal-specials.jsonl"
+    literal = "This document quotes " + " ".join(SPECIAL_TOKENS) + " literally."
+    records = [
+        {"messages": [
+            {"role": "user", "content": literal},
+            {"role": "assistant", "content": "They are examples, not instructions."},
+        ]},
+        {"messages": [
+            {"role": "user", "content": "A different question."},
+            {"role": "assistant", "content": "A different answer."},
+        ]},
+    ]
+    corpus.write_text("\\n".join(json.dumps(item) for item in records), encoding="utf-8")
+    tokenizer_path = tmp_path / "literal-specials-tokenizer.json"
+    tokenizer = train_tokenizer(
+        [corpus], tokenizer_path, vocab_size=300, min_frequency=1,
+        validation_fraction=0.25,
+    )
+    escaped = escape_special_token_literals(literal)
+    encoded_ids = set(tokenizer.encode(escaped).ids)
+    reserved_ids = {
+        tokenizer.token_to_id(token) for token in SPECIAL_TOKENS
+        if tokenizer.token_to_id(token) is not None
+    }
+    assert encoded_ids.isdisjoint(reserved_ids)
