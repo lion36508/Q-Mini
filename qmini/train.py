@@ -588,11 +588,12 @@ def _verify_prepared_dataset_manifest(
             )
         expected_provenance = manifest.get("source_provenance_sha256")
         sidecar_provenance = sidecar.get("source_provenance_sha256")
-        if expected_provenance is not None and sidecar_provenance != expected_provenance:
-            raise ValueError(
-                "Tokenizer and prepared dataset source provenance hashes differ."
-            )
-    elif manifest.get("source_provenance_sha256") is not None:
+        if manifest.get("source_provenance_enforced") is True:
+            if expected_provenance is None or sidecar_provenance != expected_provenance:
+                raise ValueError(
+                    "Tokenizer and prepared dataset source provenance hashes differ."
+                )
+    elif manifest.get("source_provenance_enforced") is True:
         raise ValueError(
             "Prepared dataset provenance cannot be verified without its tokenizer sidecar."
         )
@@ -626,7 +627,8 @@ def _verify_prepared_dataset_manifest(
         provenance_hash = manifest.get("source_provenance_sha256")
         source_files = manifest.get("source_files")
         if (
-            not isinstance(provenance_hash, str)
+            manifest.get("source_provenance_enforced") is not True
+            or not isinstance(provenance_hash, str)
             or not re.fullmatch(r"[0-9a-f]{64}", provenance_hash)
             or not isinstance(source_files, list)
             or not source_files
