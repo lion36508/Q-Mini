@@ -7,8 +7,10 @@ import os
 import re
 import sqlite3
 import tempfile
+from datetime import date
 from pathlib import Path
 from typing import Iterable, Iterator
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -690,6 +692,140 @@ def _file_manifest(
             entry["absolute_path"] = str(path)
         result.append(entry)
     return result
+
+
+
+def build_source_provenance(
+    paths: Iterable[str | Path],
+    metadata_path: str | Path | None = None,
+    release_mode: bool = False,
+) -> tuple[list[dict[str, object]], str, int | None]:
+    """Build a stable source/license manifest and optionally enforce release gates.
+
+    Metadata JSON format:
+      {"format":"qmini-source-provenance-v1","sources":[
+        {"path":"corpus.jsonl","source_name":"...","source_uri":"https://...",
+         "license_spdx":"CC-BY-4.0","collected_at":"2026-11-10",
+         "language":"en","transformation_version":"raw-v1"}]}
+    Paths are matched by basename. Duplicate basenames are rejected to avoid
+    ambiguous provenance. Research mode records unknown provenance explicitly;
+    release mode rejects unknown fields and scans records for likely PII/secrets.
+    """
+    source_paths = expand_data_paths(paths)
+    if not source_paths:
+        raise FileNotFoundError("No supported dataset files were found.")
+    names = [path.name for path in source_paths]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            "Dataset files have duplicate basenames; use unique filenames so source provenance is unambiguous."
+        )
+
+    supplied: dict[str, dict[str, object]] = {}
+    if metadata_path is not None:
+        metadata_file = Path(metadata_path).expanduser()
+        if not metadata_file.is_file():
+            raise FileNotFoundError(f"Source metadata file not found: {metadata_file}")
+        try:
+            payload = json.loads(metadata_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Source metadata must be valid UTF-8 JSON.") from exc
+        if not isinstance(payload, dict) or payload.get("format") != "qmini-source-provenance-v1":
+            raise ValueError("Unsupported source metadata format; expected qmini-source-provenance-v1.")
+        records = payload.get("sources")
+        if not isinstance(records, list):
+            raise ValueError("Source metadata must contain a 'sources' array.")
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("Each source metadata entry must be a JSON object.")
+            name = record.get("path")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Each source metadata entry requires a non-empty 'path' basename.")
+            name = Path(name).name
+            if name in supplied:
+                raise ValueError(f"Duplicate source metadata entry for {name!r}.")
+            supplied[name] = record
+        extras = sorted(set(supplied) - set(names))
+        if extras:
+            raise ValueError(
+                "Source metadata references files that are not in this dataset input: "
+                + ", ".join(extras)
+            )
+    elif release_mode:
+        raise ValueError("Release mode requires --source-metadata with explicit source licenses.")
+
+    base_files = _file_manifest(source_paths)
+    result: list[dict[str, object]] = []
+    for base in base_files:
+        name = str(base["path"])
+        record = supplied.get(name, {})
+        fields = {
+            "source_name": record.get("source_name") or name,
+            "source_uri": record.get("source_uri"),
+            "license_spdx": record.get("license_spdx") or "UNKNOWN",
+            "collected_at": record.get("collected_at"),
+            "language": record.get("language") or "und",
+            "transformation_version": record.get("transformation_version") or "unknown",
+        }
+        if release_mode:
+            missing = [
+                key for key, value in fields.items()
+                if value is None or not str(value).strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"Release provenance for {name!r} is missing: {', '.join(missing)}."
+                )
+            license_value = str(fields["license_spdx"]).strip()
+            if license_value.casefold() in {"unknown", "unlicensed", "none", "n/a"}:
+                raise ValueError(
+                    f"Release dataset rejects unknown or unapproved license for {name!r}."
+                )
+            uri = urlsplit(str(fields["source_uri"]))
+            if uri.scheme not in {"http", "https"} or not uri.netloc or uri.username or uri.password:
+                raise ValueError(f"Release provenance for {name!r} needs a public HTTP(S) source URI.")
+            try:
+                date.fromisoformat(str(fields["collected_at"])[:10])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Release provenance for {name!r} needs an ISO-8601 collection date."
+                ) from exc
+            language = str(fields["language"])
+            if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", language):
+                raise ValueError(f"Release provenance for {name!r} needs a BCP-47 language tag.")
+            if not str(fields["transformation_version"]).strip():
+                raise ValueError(f"Release provenance for {name!r} needs a transformation version.")
+        result.append({**base, **fields, "document_count": None})
+
+    sensitive_records: int | None = None
+    if release_mode:
+        email_pattern = re.compile(
+            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9_-])"
+        )
+        secret_patterns = (
+            re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+            re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+            re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+            re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"),
+        )
+        sensitive_records = 0
+        for path in source_paths:
+            for record in iter_source_records([path]):
+                text = extract_text(record)
+                if email_pattern.search(text) or any(
+                    pattern.search(text) for pattern in secret_patterns
+                ):
+                    sensitive_records += 1
+        if sensitive_records:
+            raise ValueError(
+                f"Release dataset blocked: {sensitive_records} records contain potential PII/secrets. "
+                "No raw content was logged; remove or quarantine flagged records before retrying."
+            )
+
+    canonical = json.dumps(
+        result, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    provenance_sha256 = hashlib.sha256(canonical).hexdigest()
+    return result, provenance_sha256, sensitive_records
 
 
 def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
