@@ -174,6 +174,17 @@ def load_model(model_dir: str | Path, device: str | None = None):
         )
     return model, tokenizer, target
 
+def _encode_generation_prompt_ids(
+    prompt: str,
+    tokenizer,
+    *,
+    serialized_prompt: bool = False,
+) -> list[int]:
+    """Encode a prompt without allowing untrusted text to forge control-token IDs."""
+    safe_prompt = prompt if serialized_prompt else escape_special_token_literals(prompt)
+    return tokenizer.encode(safe_prompt).ids
+
+
 def _sample_next_token(
     logits: torch.Tensor,
     temperature: float,
@@ -262,8 +273,9 @@ def generate(
         if token_id is not None
     )
 
-    prompt_text = prompt if serialized_prompt else escape_special_token_literals(prompt)
-    prompt_ids = tokenizer.encode(prompt_text).ids
+    prompt_ids = _encode_generation_prompt_ids(
+        prompt, tokenizer, serialized_prompt=serialized_prompt
+    )
     context_ids = [bos_id, *prompt_ids]
     if len(context_ids) > model.config.max_context:
         context_ids = [bos_id, *context_ids[-(model.config.max_context - 1):]]
