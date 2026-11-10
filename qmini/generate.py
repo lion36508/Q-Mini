@@ -11,6 +11,7 @@ import torch
 from .config import QMiniConfig
 from .model import QMiniMoE
 from .tokenizer import load_tokenizer, special_token_id
+from .text import escape_special_token_literals
 
 
 def load_model(model_dir: str | Path, device: str | None = None):
@@ -430,7 +431,7 @@ def interactive_chat(
             matches = memory_store.search(user_text, limit=3)
             if matches:
                 memory_lines = [
-                    f"[MEMORY {item['id']}] {item['content'][:700]}"
+                    f"[MEMORY {item['id']}] {escape_special_token_literals(item['content'][:700])}"
                     for item in matches
                 ]
                 if has_control_tokens:
@@ -448,10 +449,11 @@ def interactive_chat(
                     )
                 print("Using local memory:", ", ".join(f"#{item['id']}" for item in matches))
 
+        safe_user_text = escape_special_token_literals(user_text)
         user_block = (
-            f"<|user|>{user_text}\n<|end|>\n<|assistant|>"
+            f"<|user|>{safe_user_text}\n<|end|>\n<|assistant|>"
             if has_control_tokens
-            else f"[USER]\n{user_text}\n[ASSISTANT]\n"
+            else f"[USER]\n{safe_user_text}\n[ASSISTANT]\n"
         )
         try:
             history, prompt = prepare_chat_prompt(
@@ -472,10 +474,11 @@ def interactive_chat(
             max_new_tokens=max_new_tokens,
         )
         print("Q-Mini: " + answer)
+        safe_answer = escape_special_token_literals(answer)
         if has_control_tokens:
-            history += answer + "\n<|end|>\n"
+            history += safe_answer + "\n<|end|>\n"
         else:
-            history += answer + "\n"
+            history += safe_answer + "\n"
         ids = tokenizer.encode(history).ids
         if len(ids) > model.config.max_context * 3 // 4:
             try:
