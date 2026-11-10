@@ -849,6 +849,8 @@ def prepare_token_streams(
     loss_mask_mode: str = "auto",
     include_absolute_source_paths: bool = False,
     near_duplicate_distance: int = 0,
+    source_metadata_path: str | Path | None = None,
+    release_mode: bool = False,
 ) -> dict[str, object]:
     """Prepare deduplicated train/validation token and assistant-loss-mask streams.
 
@@ -868,6 +870,11 @@ def prepare_token_streams(
     paths = expand_data_paths(data_paths)
     if not paths:
         raise FileNotFoundError("No supported dataset files were found.")
+    provenance_files, source_provenance_sha256, sensitive_records_screened = (
+        build_source_provenance(
+            paths, metadata_path=source_metadata_path, release_mode=release_mode
+        )
+    )
 
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
@@ -906,6 +913,17 @@ def prepare_token_streams(
             )
         if sidecar.get("tokenizer_sha256") != _sha256_file(tokenizer_path_obj):
             raise ValueError("Tokenizer file does not match its Q-Mini split manifest.")
+        if release_mode and sidecar.get("release_mode") is not True:
+            raise ValueError(
+                "Release preparation requires a tokenizer fitted with --release-mode "
+                "so source licenses and PII/secrets were checked before BPE training."
+            )
+        saved_provenance = sidecar.get("source_provenance_sha256")
+        if saved_provenance is not None and saved_provenance != source_provenance_sha256:
+            raise ValueError(
+                "Tokenizer source provenance differs from prepared data. Rebuild the tokenizer "
+                "with the same source metadata and source files."
+            )
     bos_id = special_token_id(tokenizer, "<bos>")
     eos_id = special_token_id(tokenizer, "<eos>")
     vocab_size = tokenizer.get_vocab_size()
@@ -949,19 +967,23 @@ def prepare_token_streams(
 
         # First pass: exact duplicates and optional near-duplicate groups are
         # indexed on disk, never retained as a Python list in memory.
+        for source in provenance_files:
+            source["document_count"] = 0
         with connection:
-            for record in iter_source_records(paths):
-                normalized = extract_text(record).strip()
-                if len(normalized) < 2:
-                    stats["skipped_short_documents"] += 1
-                    continue
-                _digest, inserted = _register_document(
-                    connection, normalized, near_duplicate_distance
-                )
-                if inserted:
-                    stats["unique_documents"] += 1
-                else:
-                    stats["duplicate_documents"] += 1
+            for source_index, source_path in enumerate(paths):
+                for record in iter_source_records([source_path]):
+                    normalized = extract_text(record).strip()
+                    if len(normalized) < 2:
+                        stats["skipped_short_documents"] += 1
+                        continue
+                    provenance_files[source_index]["document_count"] += 1
+                    _digest, inserted = _register_document(
+                        connection, normalized, near_duplicate_distance
+                    )
+                    if inserted:
+                        stats["unique_documents"] += 1
+                    else:
+                        stats["duplicate_documents"] += 1
 
         unique_count = int(stats["unique_documents"])
         if unique_count < 2:
@@ -982,50 +1004,51 @@ def prepare_token_streams(
             temp_outputs[2].open("wb") as train_mask_file,
             temp_outputs[3].open("wb") as valid_mask_file,
         ):
-            for record in iter_source_records(paths):
-                normalized = extract_text(record).strip()
-                if len(normalized) < 2:
-                    continue
-                digest = hashlib.sha256(
-                    _encode_dataset_text(normalized)
-                ).digest()
-                if connection.execute(
-                    "SELECT 1 FROM documents WHERE digest=?", (digest,)
-                ).fetchone() is None:
-                    raise RuntimeError("Source data changed during token preparation.")
-                inserted = connection.execute(
-                    "INSERT OR IGNORE INTO written(digest) VALUES (?)", (digest,)
-                )
-                if inserted.rowcount == 0:
-                    continue
-                is_validation = _document_is_validation(connection, digest)
+            for source_path in paths:
+                for record in iter_source_records([source_path]):
+                    normalized = extract_text(record).strip()
+                    if len(normalized) < 2:
+                        continue
+                    digest = hashlib.sha256(
+                        _encode_dataset_text(normalized)
+                    ).digest()
+                    if connection.execute(
+                        "SELECT 1 FROM documents WHERE digest=?", (digest,)
+                    ).fetchone() is None:
+                        raise RuntimeError("Source data changed during token preparation.")
+                    inserted = connection.execute(
+                        "INSERT OR IGNORE INTO written(digest) VALUES (?)", (digest,)
+                    )
+                    if inserted.rowcount == 0:
+                        continue
+                    is_validation = _document_is_validation(connection, digest)
 
-                encoded = _encode_record(
-                    record, tokenizer, bos_id, eos_id, loss_mask_mode
-                )
-                if encoded is None:
-                    stats["skipped_without_targets"] += 1
-                    continue
-                token_ids, loss_mask = encoded
-                if token_ids.size and int(token_ids.max()) >= vocab_size:
-                    raise ValueError("Tokenizer emitted an ID outside its declared vocabulary.")
-                if token_ids.size != loss_mask.size:
-                    raise RuntimeError("Token and loss-mask lengths do not match.")
-                if not np.isin(loss_mask, (0, 1)).all():
-                    raise RuntimeError("Loss mask must contain only binary values.")
+                    encoded = _encode_record(
+                        record, tokenizer, bos_id, eos_id, loss_mask_mode
+                    )
+                    if encoded is None:
+                        stats["skipped_without_targets"] += 1
+                        continue
+                    token_ids, loss_mask = encoded
+                    if token_ids.size and int(token_ids.max()) >= vocab_size:
+                        raise ValueError("Tokenizer emitted an ID outside its declared vocabulary.")
+                    if token_ids.size != loss_mask.size:
+                        raise RuntimeError("Token and loss-mask lengths do not match.")
+                    if not np.isin(loss_mask, (0, 1)).all():
+                        raise RuntimeError("Loss mask must contain only binary values.")
 
-                if is_validation:
-                    token_ids.tofile(valid_file)
-                    loss_mask.tofile(valid_mask_file)
-                    stats["valid_tokens"] += int(token_ids.size)
-                    stats["valid_target_tokens"] += int(loss_mask.sum())
-                    stats["valid_documents"] += 1
-                else:
-                    token_ids.tofile(train_file)
-                    loss_mask.tofile(train_mask_file)
-                    stats["train_tokens"] += int(token_ids.size)
-                    stats["train_target_tokens"] += int(loss_mask.sum())
-                    stats["train_documents"] += 1
+                    if is_validation:
+                        token_ids.tofile(valid_file)
+                        loss_mask.tofile(valid_mask_file)
+                        stats["valid_tokens"] += int(token_ids.size)
+                        stats["valid_target_tokens"] += int(loss_mask.sum())
+                        stats["valid_documents"] += 1
+                    else:
+                        token_ids.tofile(train_file)
+                        loss_mask.tofile(train_mask_file)
+                        stats["train_tokens"] += int(token_ids.size)
+                        stats["train_target_tokens"] += int(loss_mask.sum())
+                        stats["train_documents"] += 1
 
             for handle in (train_file, valid_file, train_mask_file, valid_mask_file):
                 handle.flush()
@@ -1065,7 +1088,22 @@ def prepare_token_streams(
             ),
             "near_duplicate_hamming_distance": near_duplicate_distance,
             "absolute_source_paths_included": bool(include_absolute_source_paths),
-            "source_files": source_manifest_before,
+            "source_files": [
+                {
+                    **entry,
+                    "source_name": provenance["source_name"],
+                    "source_uri": provenance["source_uri"],
+                    "license_spdx": provenance["license_spdx"],
+                    "collected_at": provenance["collected_at"],
+                    "language": provenance["language"],
+                    "transformation_version": provenance["transformation_version"],
+                    "document_count": provenance["document_count"],
+                }
+                for entry, provenance in zip(source_manifest_before, provenance_files)
+            ],
+            "source_provenance_sha256": source_provenance_sha256,
+            "release_mode": bool(release_mode),
+            "sensitive_records_screened": sensitive_records_screened,
             "corpus_sha256": hashlib.sha256(corpus_descriptor).hexdigest(),
             "tokenizer_sha256": _sha256_file(tokenizer_path_obj),
             "train_tokens_sha256": _sha256_file(train_path),
