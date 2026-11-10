@@ -29,6 +29,10 @@ Each convolution is padded only on the left by `dilation * (kernel_size - 1)`. N
 
 `max_context` bounds the length of one batch forward or initial prompt prefill. It does not cap the total length of a streaming decode. Streaming keeps the fixed-size convolution caches and one diagonal SSM state per active layer; it never replays the prompt after each generated token. Batch/stream parity is tested within the configured prefill length. Beyond that length, the model has recurrent compressed-history semantics, not an exact rolling-window transcript: old information may influence the state, but exact arbitrary-token recall is not guaranteed.
 
+## Text and control-token boundary
+
+The tokenizer reserves `<pad>`, `<bos>`, `<eos>`, `<unk>` and the chat role/end markers as structural token IDs. Literal occurrences of those spellings inside untrusted dataset message bodies, interactive user text, recalled notes or stored assistant text are escaped with a zero-width separator after the opening `<`. This keeps quoted text from forging role boundaries, terminating a message early or injecting special token IDs into response-only loss masks. Only the chat serializer itself writes the real structural markers.
+
 ## Quantization
 
 Production matrix weights use exactly the Q2-v2 normalized codebook {-1.0, -0.5, +0.5, +1.0}, with two bits per symbol. Each output row has FP32 scale = 2 × mean(abs(original row)); decoded effective weight = normalized symbol × row scale. Four symbols are packed per byte. A fully zero row has scale 0 and remains exact zero; an exact-zero source entry in a nonzero row maps to +0.5 × row scale because there is no zero symbol.
