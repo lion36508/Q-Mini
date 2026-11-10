@@ -361,7 +361,9 @@ def test_finetuning_initializes_weights_and_resumes_with_same_source(tmp_path, t
         steps=1, batch_size=1, seq_len=8, grad_accum=1,
         eval_every=1, save_every=1, eval_batches=1,
     )
-    initial_weights = pretrained_dir / "model.pt"
+    initial_weights = pretrained_dir / "model.qmini.npz"
+    assert initial_weights.is_file()
+    assert not (pretrained_dir / "model.pt").exists()
     sft_run = tmp_path / "sft"
     train_model(
         tiny_config, train_bin, valid_bin, sft_run,
