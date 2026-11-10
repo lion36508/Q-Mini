@@ -120,9 +120,10 @@ def run_ablation(
         weight_path = source_path / "latest.pt"
     else:
         raise FileNotFoundError(
-            "Provide a Q-Mini final_model directory with model.pt, a training run "
-            "directory with latest.pt, or an explicit --checkpoint. External/pretrained "
-            "weights are not accepted."
+            "Use a legacy Q-Mini final_model with its verified model.pt, a training "
+            "run directory containing latest.pt, or an explicit --checkpoint. New Q2-only "
+            "deployment archives are not unquantized references. External/pretrained weights "
+            "are not accepted."
         )
 
     loaded = torch.load(weight_path, map_location="cpu", weights_only=True)
@@ -491,7 +492,7 @@ def main() -> int:
         description="Compare FP16, rowwise INT8, Q2, zero-preserving ternary and groupwise INT4 weight error."
     )
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--model-dir", help="Q-Mini final_model directory or training run directory")
+    source.add_argument("--model-dir", help="legacy final_model with model.pt or training run directory with latest.pt")
     source.add_argument("--checkpoint", help="Q-Mini-owned latest.pt training checkpoint")
     parser.add_argument("--output", default="quantization-ablation.json")
     parser.add_argument("--group-size", type=int, default=64)

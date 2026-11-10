@@ -240,7 +240,7 @@ jobs:
       - name: Compare quantization formats and exercise structured conversation evaluation
         run: |
           python scripts/quantization_ablation.py \
-            --model-dir /tmp/qmini-trained-smoke/run/final_model \
+            --checkpoint /tmp/qmini-trained-smoke/run/latest.pt \
             --output /tmp/qmini-quantization-quality.json \
             --group-size 8 \
             --eval-tokens /tmp/qmini-trained-smoke/valid.bin \

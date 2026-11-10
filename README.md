@@ -367,6 +367,6 @@ For a small Q-Mini-owned checkpoint, the quantization ablation can additionally 
 
 The quantization ablation tool now groups tensor reconstruction metrics by embedding, output projection, router, expert, convolution, state-space and other components. For each Q2 matrix it records the row-scale distribution (including zero-row count) and separate packed-symbol, FP32-scale and FP16-vector payload bytes. When the final model directory contains model.qmini.npz, it also records the exact archive byte size.
 
-For a dense model.pt FP16 reference, the tool requires a matching Q-Mini model_manifest.json with config, parameter count, packed archive size and SHA-256 fingerprints for both the dense snapshot and packed export. Use the run's own latest.pt when comparing older runs that predate these manifest fingerprints. This avoids silently comparing a stale dense snapshot with an unrelated packed archive.
+The quantization ablation needs the original trainable reference weights to compare Q2 against FP16, INT8 and diagnostic formats. For new runs, pass the run's own `latest.pt` using `--checkpoint`; the final `model.qmini.npz` is already quantized and cannot act as an unquantized reference. Legacy `model.pt` snapshots remain accepted only with a matching `model_manifest.json` and packed-export fingerprints.
 
 Assistant fine-tuning is fail-closed: the notebook will not silently use the tiny smoke checkpoint as its source and requires independent held-out task and multi-turn conversation evaluation data before starting SFT.
