@@ -788,7 +788,8 @@ def build_source_provenance(
                 )
             ):
                 raise ValueError(
-                    f"Release dataset rejects unknown, malformed or unapproved license for {name!r}."
+                    f"Release dataset rejects an unknown or unapproved license "
+                    f"(or malformed SPDX expression) for {name!r}."
                 )
             uri = urlsplit(str(fields["source_uri"]))
             if uri.scheme not in {"http", "https"} or not uri.netloc or uri.username or uri.password:
