@@ -239,7 +239,10 @@ def test_q2_only_manifest_ignores_stale_dense_snapshot_and_refuses_dense_gpu_fal
 
     corpus = tmp_path / "q2-corpus.txt"
     corpus.write_text(
-        ("Q-Mini keeps "Doc 1: Q-Mini keeps production matrix weights in a packed format.\n\nDoc 2: Quantized execution "Doc 1: Q-Mini keeps production matrix weights in a packed format.\n\nDoc 2: Quantized execution relies on dedicated two-bit kernels.",relies on dedicated two-bit kernels.",production matrix weights in a packed two-bit format. ") * 20,
+        "Doc 1: Q-Mini keeps production matrix weights in a packed two-bit format.\n\n"
+        "Doc 2: Quantized execution relies on dedicated two-bit kernels.\n\n"
+        "Doc 3: Independent validation documents keep tokenizer training reproducible.\n"
+        "Doc 4: The model export records a hash for every deployment artifact.\n",
         encoding="utf-8",
     )
     model_dir = tmp_path / "q2-final-model"
