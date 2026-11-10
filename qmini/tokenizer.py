@@ -9,11 +9,7 @@ from typing import Iterable
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from .data import expand_data_paths, iter_training_text_records
-
-SPECIAL_TOKENS = [
-    "<pad>", "<bos>", "<eos>", "<unk>",
-    "<|system|>", "<|user|>", "<|assistant|>", "<|tool|>", "<|other|>", "<|end|>",
-]
+from .text import SPECIAL_TOKENS
 
 
 def train_tokenizer(
