@@ -934,7 +934,8 @@ def prepare_token_streams(
                 "so source licenses and PII/secrets were checked before BPE training."
             )
         saved_provenance = sidecar.get("source_provenance_sha256")
-        if saved_provenance is not None and saved_provenance != source_provenance_sha256:
+        provenance_enforced = release_mode or source_metadata_path is not None
+        if provenance_enforced and saved_provenance != source_provenance_sha256:
             raise ValueError(
                 "Tokenizer source provenance differs from prepared data. Rebuild the tokenizer "
                 "with the same source metadata and source files."
@@ -1117,6 +1118,7 @@ def prepare_token_streams(
                 for entry, provenance in zip(source_manifest_before, provenance_files)
             ],
             "source_provenance_sha256": source_provenance_sha256,
+            "source_provenance_enforced": bool(release_mode or source_metadata_path is not None),
             "release_mode": bool(release_mode),
             "sensitive_records_screened": sensitive_records_screened,
             "corpus_sha256": hashlib.sha256(corpus_descriptor).hexdigest(),
