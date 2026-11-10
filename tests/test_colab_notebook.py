@@ -105,3 +105,13 @@ def test_colab_runs_random_brain_architecture_preflight_before_dataset_loading()
     assert "weights updated" in preflight
     assert "qmini.cli','tokenizer'" in tokenizer_data_stage
     assert setup.index("pip','install','--no-deps','-e','.'") < len(setup)
+
+def test_colab_smoke_learning_proof_loads_training_checkpoint_not_dense_snapshot():
+    notebook_path = Path(__file__).resolve().parents[1] / "colab" / "QMini_Training.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    smoke_stage = "".join(notebook["cells"][6]["source"])
+
+    assert "checkpoint_payload = torch.load(checkpoint_path" in smoke_stage
+    assert "checkpoint_payload.get('format') != 'qmini-checkpoint-v2'" in smoke_stage
+    assert "trained_state = checkpoint_payload.get('model')" in smoke_stage
+    assert "SMOKE/'final_model'/'model.pt'" not in smoke_stage
