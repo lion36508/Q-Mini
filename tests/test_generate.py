@@ -490,3 +490,23 @@ def test_generation_prompt_encoding_rejects_invalid_trust_flag(tiny_config, tmp_
         _encode_generation_prompt_ids("plain text", tokenizer, serialized_prompt=1)
     with pytest.raises(TypeError, match="prompt must be a string"):
         _encode_generation_prompt_ids(None, tokenizer)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"max_new_tokens": True}, TypeError),
+        ({"max_new_tokens": 0}, ValueError),
+        ({"temperature": True}, TypeError),
+        ({"temperature": float("nan")}, ValueError),
+        ({"temperature": float("inf")}, ValueError),
+        ({"top_k": True}, TypeError),
+        ({"top_k": -1}, ValueError),
+        ({"top_p": True}, TypeError),
+        ({"top_p": float("nan")}, ValueError),
+        ({"top_p": 1.1}, ValueError),
+    ],
+)
+def test_generation_rejects_malformed_sampling_arguments(kwargs, error):
+    with pytest.raises(error):
+        generate(None, None, "plain prompt", **kwargs)
