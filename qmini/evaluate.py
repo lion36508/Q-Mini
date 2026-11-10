@@ -624,7 +624,7 @@ def evaluate_conversation_file(
                         top_k=0,
                         top_p=1.0,
                         thinking_steps=thinking_steps,
-                        serialized_prompt=has_control_tokens,
+                        serialized_prompt=True,
                     )
                     lexical_exact = (
                         normalize_answer(prediction)
