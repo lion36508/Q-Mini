@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import random
 import shutil
 import time
@@ -591,6 +592,35 @@ def _verify_prepared_dataset_manifest(
             raise ValueError(
                 "Tokenizer and prepared dataset source provenance hashes differ."
             )
+    elif manifest.get("source_provenance_sha256") is not None:
+        raise ValueError(
+            "Prepared dataset provenance cannot be verified without its tokenizer sidecar."
+        )
+
+    if manifest.get("source_provenance_sha256") is not None:
+        source_files = manifest.get("source_files")
+        if not isinstance(source_files, list) or not source_files:
+            raise ValueError("Prepared dataset is missing its source provenance file list.")
+        canonical_sources = []
+        source_keys = (
+            "source_index", "path", "size_bytes", "sha256",
+            "source_name", "source_uri", "license_spdx",
+            "collected_at", "language", "transformation_version",
+        )
+        for source in source_files:
+            if not isinstance(source, dict):
+                raise ValueError("Prepared dataset source provenance entries must be objects.")
+            canonical = {key: source.get(key) for key in source_keys}
+            canonical["document_count"] = None
+            canonical_sources.append(canonical)
+        actual_provenance = hashlib.sha256(
+            json.dumps(
+                canonical_sources, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if actual_provenance != manifest.get("source_provenance_sha256"):
+            raise ValueError("Prepared dataset source provenance hash is invalid.")
 
     if manifest.get("release_mode") is True:
         provenance_hash = manifest.get("source_provenance_sha256")
