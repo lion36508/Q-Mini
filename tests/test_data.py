@@ -602,7 +602,7 @@ def test_release_provenance_is_bound_to_tokenizer_and_prepared_dataset(tmp_path)
     }), encoding="utf-8")
 
     tokenizer_path = tmp_path / "tokenizer.json"
-    train_tokenizer(
+    tokenizer = train_tokenizer(
         [corpus],
         tokenizer_path,
         vocab_size=300,
@@ -629,3 +629,28 @@ def test_release_provenance_is_bound_to_tokenizer_and_prepared_dataset(tmp_path)
     assert report["source_provenance_sha256"] == tokenizer_manifest["source_provenance_sha256"]
     assert report["source_files"][0]["document_count"] == 3
     assert report["source_files"][0]["license_spdx"] == "CC0-1.0"
+
+    from qmini.train import _verify_prepared_dataset_manifest
+    prepared_dir = tmp_path / "prepared"
+    assert _verify_prepared_dataset_manifest(
+        prepared_dir / "train.bin",
+        prepared_dir / "valid.bin",
+        tokenizer_path,
+        prepared_dir / "train.mask.bin",
+        prepared_dir / "valid.mask.bin",
+        tokenizer.get_vocab_size(),
+    ) == prepared_dir / "dataset.json"
+
+    manifest_path = prepared_dir / "dataset.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_files"][0]["license_spdx"] = "MIT"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="source provenance hash is invalid"):
+        _verify_prepared_dataset_manifest(
+            prepared_dir / "train.bin",
+            prepared_dir / "valid.bin",
+            tokenizer_path,
+            prepared_dir / "train.mask.bin",
+            prepared_dir / "valid.mask.bin",
+            tokenizer.get_vocab_size(),
+        )
