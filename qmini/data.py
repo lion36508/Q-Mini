@@ -902,6 +902,11 @@ def prepare_token_streams(
     tokenizer_path_obj = Path(tokenizer_path)
     tokenizer = load_tokenizer(tokenizer_path_obj)
     tokenizer_sidecar = Path(str(tokenizer_path_obj) + ".qmini.json")
+    if release_mode and not tokenizer_sidecar.is_file():
+        raise ValueError(
+            "Release preparation requires the matching tokenizer provenance sidecar; "
+            "retrain the tokenizer with --release-mode and the same --source-metadata."
+        )
     if tokenizer_sidecar.is_file():
         try:
             sidecar = json.loads(tokenizer_sidecar.read_text(encoding="utf-8"))
