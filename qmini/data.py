@@ -767,24 +767,34 @@ def build_source_provenance(
             "transformation_version": record.get("transformation_version") or "unknown",
         }
         if release_mode:
+            required_fields = (
+                "source_name", "source_uri", "license_spdx",
+                "collected_at", "language", "transformation_version",
+            )
             missing = [
-                key for key, value in fields.items()
-                if value is None or not str(value).strip()
+                key for key in required_fields
+                if not isinstance(record.get(key), str) or not record[key].strip()
             ]
             if missing:
                 raise ValueError(
                     f"Release provenance for {name!r} is missing: {', '.join(missing)}."
                 )
             license_value = str(fields["license_spdx"]).strip()
-            if license_value.casefold() in {"unknown", "unlicensed", "none", "n/a"}:
+            if (
+                license_value.casefold() in {"unknown", "unlicensed", "none", "n/a"}
+                or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9.+-]*(?:\\s+(?:AND|OR|WITH)\\s+[A-Za-z0-9][A-Za-z0-9.+-]*)*",
+                    license_value,
+                )
+            ):
                 raise ValueError(
-                    f"Release dataset rejects unknown or unapproved license for {name!r}."
+                    f"Release dataset rejects unknown, malformed or unapproved license for {name!r}."
                 )
             uri = urlsplit(str(fields["source_uri"]))
             if uri.scheme not in {"http", "https"} or not uri.netloc or uri.username or uri.password:
                 raise ValueError(f"Release provenance for {name!r} needs a public HTTP(S) source URI.")
             try:
-                date.fromisoformat(str(fields["collected_at"])[:10])
+                date.fromisoformat(str(fields["collected_at"]))
             except ValueError as exc:
                 raise ValueError(
                     f"Release provenance for {name!r} needs an ISO-8601 collection date."
