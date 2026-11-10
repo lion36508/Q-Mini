@@ -468,11 +468,11 @@ def test_structured_message_bodies_escape_reserved_token_spellings(tmp_path):
     segments, structured, has_assistant, final_is_assistant = _record_segments(record)
     assert structured and has_assistant and final_is_assistant
     body_segments = [segment for segment, _ in segments if segment not in {
-        "<|user|>", "<|assistant|>", "<|end|>\\n"
+        "<|user|>", "<|assistant|>", "<|end|>\n"
     }]
     combined = "".join(body_segments)
     assert all(token not in combined for token in SPECIAL_TOKENS)
-    assert "\\u200b" in combined
+    assert "\u200b" in combined
     assert escape_special_token_literals(literal_text) in combined
 
 
@@ -491,7 +491,7 @@ def test_escaped_reserved_text_does_not_encode_as_control_token_ids(tmp_path):
             {"role": "assistant", "content": "A different answer."},
         ]},
     ]
-    corpus.write_text("\\n".join(json.dumps(item) for item in records), encoding="utf-8")
+    corpus.write_text("\n".join(json.dumps(item) for item in records), encoding="utf-8")
     tokenizer_path = tmp_path / "literal-specials-tokenizer.json"
     tokenizer = train_tokenizer(
         [corpus], tokenizer_path, vocab_size=300, min_frequency=1,
