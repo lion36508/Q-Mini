@@ -19,6 +19,6 @@ def escape_special_token_literals(text: str) -> str:
     if not isinstance(text, str):
         raise TypeError("text must be a string.")
     for token in SPECIAL_TOKENS:
-        escaped = token.replace("<", "<\\u200b", 1)
+        escaped = token.replace("<", "<\u200b", 1)
         text = text.replace(token, escaped)
     return text
