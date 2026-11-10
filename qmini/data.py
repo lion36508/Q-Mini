@@ -12,6 +12,8 @@ from typing import Iterable, Iterator
 
 import numpy as np
 
+from .text import escape_special_token_literals
+
 SUPPORTED_SUFFIXES = {
     ".txt", ".text", ".md", ".markdown", ".json",
     ".jsonl", ".ndjson", ".csv", ".parquet",
@@ -565,7 +567,9 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
                 if not isinstance(message, dict):
                     continue
                 role = str(message.get("role", "unknown")).strip().lower()
-                body = extract_text(message.get("content", message.get("text", ""))).strip()
+                body = escape_special_token_literals(
+                    extract_text(message.get("content", message.get("text", ""))).strip()
+                )
                 if not body:
                     continue
                 is_assistant = role in ASSISTANT_ROLES
@@ -599,6 +603,8 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
             for key in assistant_fields
             if record.get(key) is not None and extract_text(record[key]).strip()
         )
+        user_text = escape_special_token_literals(user_text)
+        assistant_text = escape_special_token_literals(assistant_text)
         if user_text and assistant_text:
             return [
                 ("<|user|>", False),
@@ -609,7 +615,7 @@ def _record_segments(record: object) -> tuple[list[tuple[str, bool]], bool, bool
                 ("<|end|>\n", True),
             ], True, True, True
 
-    text = extract_text(record).strip()
+    text = escape_special_token_literals(extract_text(record).strip())
     if not text:
         return [], False, False, False
     return [(text, True)], False, True, True
