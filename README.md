@@ -8,7 +8,7 @@
 
 ## Build an untrained Q2-v2 initial brain
 
-For the step-zero two-bit Q2-v2 build (without allocating the complete dense 5B model), use [the initial-brain Colab and CLI guide](docs/INITIAL_BRAIN_Q2_BUILD.md). Do not confuse the packed deployment artifact with the temporary FP32 master parameters used by QAT training.
+For the step-zero two-bit Q2-v2 build (without allocating the complete dense 5B model), use [the initial-brain Colab and CLI guide](docs/INITIAL_BRAIN_Q2_BUILD.md). Production matrix weights are exported as verified Q2-v2 (2 bits per symbol). The current QAT trainer still uses FP32 master parameters and optimizer state; this is a training-memory limitation, not a Q2 deployment artifact.
 
 ## 1. Project vision
 
@@ -294,7 +294,7 @@ The Colab notebook uses a configurable initial token budget based on 20 tokens p
 
 The training loop aggregates assistant-response loss by supervised target-token count across the complete gradient-accumulation batch. This prevents a short assistant answer and a long assistant answer from receiving equal microbatch weight solely because they happened to land in different microbatches.
 
-A new instruction/SFT run can initialize from `final_model/model.pt` or the packed `final_model/model.qmini.npz` using `--init-from`. The packed archive is streamed into trainable weights tensor-by-tensor; the fine-tuning stage gets a fresh optimizer. Its source model hash/path is saved in the run manifest and verified when resuming the SFT run. Use an assistant-only loss mask for structured conversations.
+A new instruction/SFT run should initialize from the packed `final_model/model.qmini.npz` using `--init-from`. The packed archive is streamed into trainable weights tensor-by-tensor; the fine-tuning stage gets a fresh optimizer. Legacy `model.pt` inputs remain readable when explicitly supplied, but new final-model exports no longer create them. The source model hash/path is saved in the run manifest and verified when resuming the SFT run. Use an assistant-only loss mask for structured conversations.
 
 These additions improve architectural coverage and training correctness. They do not prove natural conversational ability. That still requires real training, held-out multi-turn evaluation and measured improvements.
 
@@ -303,7 +303,7 @@ These additions improve architectural coverage and training correctness. They do
 
 The 5B profile contains 5,132,630,288 parameters. Its exact row-padded Q2 + FP32 row-scale + FP16 vector layout is estimated at **1,294,831,200 bytes** (about 1.295 GB decimal / 1.206 GiB), below the 1.5 GB model-weight artifact budget. This is a pre-training layout estimate; the actual exported archive is measured and written to \`model_manifest.json\`. Tokenizer and application files are additional.
 
-Large final model folders omit the redundant FP32 \`model.pt\` and keep \`model.qmini.npz\`. The default loader uses the packed CPU runtime without creating 5B dense FP32 matrices. A compiled C++ kernel is recommended for speed:
+New final-model folders now contain the verified `model.qmini.npz` deployment export and do not generate a dense FP32 `model.pt` snapshot, even for small models. Existing legacy `model.pt` files are left untouched for compatibility. The resumable `latest.pt` checkpoint remains outside `final_model/` and still contains FP32 QAT master parameters and AdamW state; BF16/FP16 autocast does not change that storage. Thus production matrix weights are strictly Q2-v2, but the current training process is not entirely two-bit. A later all-low-bit training path needs its own optimizer, gradient and quality validation. The default loader uses the packed CPU runtime without creating 5B dense FP32 matrices. A compiled C++ kernel is recommended for speed:
 
 \`\`\`bash
 python -m qmini.native --build

@@ -1017,7 +1017,13 @@ def train_model(
             "minimum": 1,
             "maximum": config.max_thinking_steps,
         },
+        # "precision" describes autocast only; it does not describe parameter storage.
         "precision": "bf16" if use_bf16 else "fp16" if use_fp16 else "fp32",
+        "autocast_precision": "bf16" if use_bf16 else "fp16" if use_fp16 else "off",
+        "trainable_parameter_dtypes": sorted({str(parameter.dtype) for parameter in model.parameters()}),
+        "trainable_weight_policy": "fp32-master-q2-ste",
+        "deployment_matrix_weight_format": "qmini-packed-v2",
+        "deployment_matrix_weight_bits": 2,
         "device": str(device),
         "memory_preflight": memory_preflight,
     }
@@ -1211,19 +1217,24 @@ def train_model(
         model.state_dict(), config, final_dir / "model.qmini.npz"
     )
 
-    # Keep a convenient dense snapshot for small research runs only. Large
-    # releases stay in the packed 2-bit deployment format; latest.pt remains
-    # the resumable training checkpoint outside final_model/.
-    dense_snapshot_budget = 256 * 1024 * 1024
-    dense_snapshot_included = config.estimated_parameter_count() * 4 <= dense_snapshot_budget
-    if dense_snapshot_included:
-        _atomic_torch_save(model.state_dict(), final_dir / "model.pt")
+    # New deployment folders contain only the verified Q2-v2 matrix export.
+    # Never write a dense FP32 model.pt here. If an older run already has one,
+    # preserve it untouched; resumable training state remains in latest.pt.
+    from .export import verify_packed_export
+    packed_report = verify_packed_export(packed_path)
+    if packed_report.get("format") != "qmini-packed-v2" or packed_report.get("q2_version") != 2:
+        raise RuntimeError("Final deployment export is not verified Q2-v2.")
+    legacy_dense_snapshot_preserved = (final_dir / "model.pt").is_file()
 
     packed_fingerprint = _sha256_file(packed_path)
-    dense_snapshot_fingerprint = (
-        _sha256_file(final_dir / "model.pt")
-        if dense_snapshot_included else None
-    )
+    dense_snapshot_fingerprint = None
+    trainable_parameter_dtypes = sorted({str(parameter.dtype) for parameter in model.parameters()})
+    optimizer_state_dtypes = sorted({
+        str(value.dtype)
+        for state in optimizer.state.values()
+        for value in state.values()
+        if isinstance(value, torch.Tensor) and value.is_floating_point()
+    })
     tokenizer_fingerprint = (
         _sha256_file(tokenizer_path)
         if tokenizer_path is not None and Path(tokenizer_path).is_file()
@@ -1242,9 +1253,16 @@ def train_model(
             tokenizer_fingerprint["size_bytes"] if tokenizer_fingerprint else None
         ),
         "parameters": model.parameter_report()["total"],
+        "matrix_weight_format": "qmini-packed-v2",
+        "matrix_weight_bits": 2,
+        "q2_codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+        "packed_export_verification": packed_report,
         "packed_export": packed_path.name,
         "packed_export_bytes": packed_fingerprint["size_bytes"],
         "packed_export_sha256": packed_fingerprint["sha256"],
+        "trainable_parameter_dtypes": trainable_parameter_dtypes,
+        "trainable_weight_policy": "fp32-master-q2-ste",
+        "optimizer_state_dtypes": optimizer_state_dtypes,
         "dense_snapshot_sha256": (
             dense_snapshot_fingerprint["sha256"]
             if dense_snapshot_fingerprint else None
@@ -1258,8 +1276,8 @@ def train_model(
         "within_1_5gb_weight_artifact_budget": (
             config.estimated_packed_export_bytes() <= 1_500_000_000
         ),
-        "dense_training_snapshot_included": dense_snapshot_included,
-        "dense_snapshot_budget_bytes": dense_snapshot_budget,
+        "dense_training_snapshot_included": False,
+        "legacy_dense_snapshot_preserved": legacy_dense_snapshot_preserved,
         "resume_checkpoint": str(checkpoint_path),
         "config": config.to_dict(),
     }

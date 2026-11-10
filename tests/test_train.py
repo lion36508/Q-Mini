@@ -132,12 +132,19 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
         (final / "model_manifest.json").read_text(encoding="utf-8")
     )
     packed_path = final / manifest["packed_export"]
-    dense_path = final / "model.pt"
     assert manifest["format"] == "qmini-final-model-v2"
+    assert manifest["matrix_weight_format"] == "qmini-packed-v2"
+    assert manifest["matrix_weight_bits"] == 2
+    assert manifest["q2_codebook"] == {
+        "00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0
+    }
     assert manifest["packed_export_bytes"] == packed_path.stat().st_size
     assert manifest["packed_export_sha256"] == hashlib.sha256(packed_path.read_bytes()).hexdigest()
-    assert manifest["dense_snapshot_bytes"] == dense_path.stat().st_size
-    assert manifest["dense_snapshot_sha256"] == hashlib.sha256(dense_path.read_bytes()).hexdigest()
+    assert manifest["dense_training_snapshot_included"] is False
+    assert manifest["dense_snapshot_bytes"] is None
+    assert manifest["dense_snapshot_sha256"] is None
+    assert not (final / "model.pt").exists()
+    assert manifest["trainable_weight_policy"] == "fp32-master-q2-ste"
 
 
 def test_resume_rejects_changed_training_data(tiny_config, tmp_path):
