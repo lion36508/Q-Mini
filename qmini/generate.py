@@ -218,8 +218,19 @@ def generate(
     top_k: int = 40,
     top_p: float = 0.9,
     thinking_steps: int | None = None,
+    *,
+    serialized_prompt: bool = False,
 ) -> str:
-    """Autoregressive generation using cached causal-convolution histories."""
+    """Autoregressive generation using cached causal-convolution histories.
+
+    Untrusted plain-text prompts have literal reserved-token spellings escaped
+    before tokenization. Set serialized_prompt=True only for prompts created by
+    Q-Mini's trusted chat serializer, which intentionally includes role markers.
+    """
+    if not isinstance(prompt, str):
+        raise TypeError("prompt must be a string.")
+    if not isinstance(serialized_prompt, bool):
+        raise TypeError("serialized_prompt must be a boolean.")
     if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer.")
     if not math.isfinite(float(temperature)) or temperature < 0:
@@ -251,7 +262,8 @@ def generate(
         if token_id is not None
     )
 
-    prompt_ids = tokenizer.encode(prompt).ids
+    prompt_text = prompt if serialized_prompt else escape_special_token_literals(prompt)
+    prompt_ids = tokenizer.encode(prompt_text).ids
     context_ids = [bos_id, *prompt_ids]
     if len(context_ids) > model.config.max_context:
         context_ids = [bos_id, *context_ids[-(model.config.max_context - 1):]]
@@ -568,6 +580,7 @@ def interactive_chat(
         answer = generate(
             model, tokenizer, prompt,
             max_new_tokens=max_new_tokens,
+            serialized_prompt=has_control_tokens,
         )
         print("Q-Mini: " + answer)
         safe_answer = escape_special_token_literals(answer)
