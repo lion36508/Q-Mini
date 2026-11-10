@@ -8,7 +8,7 @@ from typing import Iterable
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-from .data import expand_data_paths, iter_training_text_records
+from .data import build_source_provenance, expand_data_paths, iter_training_text_records
 from .text import SPECIAL_TOKENS
 
 
@@ -20,6 +20,8 @@ def train_tokenizer(
     overwrite: bool = False,
     validation_fraction: float = 0.02,
     near_duplicate_distance: int = 0,
+    source_metadata_path: str | Path | None = None,
+    release_mode: bool = False,
 ) -> Tokenizer:
     """Train byte-level BPE on unique training documents, excluding validation docs."""
     target = Path(output_path)
@@ -43,6 +45,11 @@ def train_tokenizer(
     paths = expand_data_paths(data_paths)
     if not paths:
         raise FileNotFoundError("No supported dataset files were found.")
+    source_files, source_provenance_sha256, sensitive_records_screened = (
+        build_source_provenance(
+            paths, metadata_path=source_metadata_path, release_mode=release_mode
+        )
+    )
 
     tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
@@ -78,6 +85,10 @@ def train_tokenizer(
             "tokenizer_sha256": digest.hexdigest(),
             "validation_fraction": float(validation_fraction),
             "near_duplicate_hamming_distance": int(near_duplicate_distance),
+            "source_provenance_sha256": source_provenance_sha256,
+            "source_files": source_files,
+            "release_mode": bool(release_mode),
+            "sensitive_records_screened": sensitive_records_screened,
         }
         with manifest_temporary.open("w", encoding="utf-8") as handle:
             json.dump(manifest, handle, indent=2, sort_keys=True)
