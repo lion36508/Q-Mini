@@ -404,7 +404,7 @@ def test_load_model_rejects_tokenizer_fingerprint_drift(tiny_config, tmp_path):
         tiny_config, tmp_path / "tokenizer-drift-model"
     )
     tokenizer_path = model_dir / "tokenizer.json"
-    tokenizer_path.write_bytes(tokenizer_path.read_bytes() + b"\\n")
+    tokenizer_path.write_bytes(tokenizer_path.read_bytes() + b"\n")
 
     with pytest.raises(ValueError, match="Tokenizer SHA-256"):
         load_model(model_dir, device="cpu")
