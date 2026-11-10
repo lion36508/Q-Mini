@@ -86,6 +86,7 @@ def train_tokenizer(
             "validation_fraction": float(validation_fraction),
             "near_duplicate_hamming_distance": int(near_duplicate_distance),
             "source_provenance_sha256": source_provenance_sha256,
+            "source_provenance_enforced": bool(release_mode or source_metadata_path is not None),
             "source_files": source_files,
             "release_mode": bool(release_mode),
             "sensitive_records_screened": sensitive_records_screened,
