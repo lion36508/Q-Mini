@@ -294,3 +294,105 @@ def test_q2_only_manifest_ignores_stale_dense_snapshot_and_refuses_dense_gpu_fal
 
     with pytest.raises(RuntimeError, match="packed Q2-v2 inference runtime is CPU-only"):
         load_model(model_dir, device="cuda")
+
+
+
+def _make_fingerprinted_q2_model_bundle(tiny_config, root):
+    import hashlib
+    import json
+
+    from qmini.config import QMiniConfig
+    from qmini.export import export_packed_state
+
+    root.mkdir()
+    corpus = root / "corpus.txt"
+    corpus.write_text(
+        "Document one: A packed language model predicts the next token.\\n\\n"
+        "Document two: Independent validation data measures generalization.\\n\\n"
+        "Document three: Safe checkpoints preserve exact model provenance.\\n"
+        "Document four: Causal sequence models process tokens from left to right.\\n",
+        encoding="utf-8",
+    )
+    tokenizer_path = root / "tokenizer.json"
+    tokenizer = train_tokenizer([corpus], tokenizer_path, vocab_size=300, min_frequency=1)
+    values = tiny_config.to_dict()
+    values["vocab_size"] = tokenizer.get_vocab_size()
+    config = QMiniConfig.from_dict(values)
+    config.save(root / "config.json")
+
+    model = QMiniMoE(config)
+    packed_path = root / "model.qmini.npz"
+    export_packed_state(model.state_dict(), config, packed_path)
+    manifest = {
+        "format": "qmini-final-model-v2",
+        "config": config.to_dict(),
+        "parameters": config.estimated_parameter_count(),
+        "tokenizer_sha256": hashlib.sha256(tokenizer_path.read_bytes()).hexdigest(),
+        "packed_export": packed_path.name,
+        "packed_export_bytes": packed_path.stat().st_size,
+        "packed_export_sha256": hashlib.sha256(packed_path.read_bytes()).hexdigest(),
+        "matrix_weight_format": "qmini-packed-v2",
+        "matrix_weight_bits": 2,
+        "dense_training_snapshot_included": False,
+        "dense_snapshot_bytes": None,
+        "dense_snapshot_sha256": None,
+    }
+    (root / "model_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    return root, manifest
+
+
+def test_load_model_rejects_valid_but_unfingerprinted_replacement_q2_archive(
+    tiny_config, tmp_path
+):
+    model_dir, _manifest = _make_fingerprinted_q2_model_bundle(
+        tiny_config, tmp_path / "fingerprinted-model"
+    )
+    packed_path = model_dir / "model.qmini.npz"
+    packed_path.write_bytes(packed_path.read_bytes() + b"valid-container-was-replaced")
+
+    with pytest.raises(ValueError, match="size/SHA-256"):
+        load_model(model_dir, device="cpu")
+
+
+def test_load_model_rejects_manifest_config_drift(tiny_config, tmp_path):
+    import json
+
+    model_dir, manifest = _make_fingerprinted_q2_model_bundle(
+        tiny_config, tmp_path / "config-drift-model"
+    )
+    manifest["config"]["dropout"] = 0.25
+    (model_dir / "model_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="config does not match"):
+        load_model(model_dir, device="cpu")
+
+
+def test_load_model_rejects_corrupt_declared_dense_snapshot(tiny_config, tmp_path):
+    import hashlib
+    import json
+    import torch
+
+    model_dir, manifest = _make_fingerprinted_q2_model_bundle(
+        tiny_config, tmp_path / "dense-fingerprint-model"
+    )
+    model = QMiniMoE(
+        __import__("qmini.config", fromlist=["QMiniConfig"]).QMiniConfig.from_json(
+            model_dir / "config.json"
+        )
+    )
+    dense_path = model_dir / "model.pt"
+    torch.save(model.state_dict(), dense_path)
+    manifest["dense_training_snapshot_included"] = True
+    manifest["dense_snapshot_bytes"] = dense_path.stat().st_size
+    manifest["dense_snapshot_sha256"] = hashlib.sha256(dense_path.read_bytes()).hexdigest()
+    (model_dir / "model_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    dense_path.write_bytes(dense_path.read_bytes() + b"tampered")
+
+    with pytest.raises(ValueError, match="Dense model.pt size/SHA-256"):
+        load_model(model_dir, device="cpu")
