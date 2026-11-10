@@ -246,12 +246,20 @@ def generate(
         raise TypeError("prompt must be a string.")
     if not isinstance(serialized_prompt, bool):
         raise TypeError("serialized_prompt must be a boolean.")
-    if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+        raise TypeError("max_new_tokens must be an integer.")
+    if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer.")
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+        raise TypeError("temperature must be a real number.")
     if not math.isfinite(float(temperature)) or temperature < 0:
         raise ValueError("temperature must be finite and non-negative.")
-    if not isinstance(top_k, int) or top_k < 0:
+    if isinstance(top_k, bool) or not isinstance(top_k, int):
+        raise TypeError("top_k must be an integer.")
+    if top_k < 0:
         raise ValueError("top_k must be a non-negative integer.")
+    if isinstance(top_p, bool) or not isinstance(top_p, (int, float)):
+        raise TypeError("top_p must be a real number.")
     if not math.isfinite(float(top_p)) or not 0.0 <= top_p <= 1.0:
         raise ValueError("top_p must be between 0 and 1.")
     if model.training:
