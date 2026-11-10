@@ -596,7 +596,7 @@ def interactive_chat(
         answer = generate(
             model, tokenizer, prompt,
             max_new_tokens=max_new_tokens,
-            serialized_prompt=has_control_tokens,
+            serialized_prompt=True,
         )
         print("Q-Mini: " + answer)
         safe_answer = escape_special_token_literals(answer)
