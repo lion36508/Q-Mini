@@ -33,7 +33,7 @@ def test_precision_audit_writes_json_and_enforces_selected_gate(tmp_path):
     source = tmp_path / "qmini"
     source.mkdir()
     (source / "train.py").write_text(
-        'optimizer = torch.optim.AdamW(params)\n', encoding="utf-8"
+        'optimizer_state_dtype = torch.float32\n', encoding="utf-8"
     )
     output = tmp_path / "reports" / "precision.json"
 
