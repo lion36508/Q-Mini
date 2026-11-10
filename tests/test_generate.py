@@ -396,3 +396,15 @@ def test_load_model_rejects_corrupt_declared_dense_snapshot(tiny_config, tmp_pat
 
     with pytest.raises(ValueError, match="Dense model.pt size/SHA-256"):
         load_model(model_dir, device="cpu")
+
+
+
+def test_load_model_rejects_tokenizer_fingerprint_drift(tiny_config, tmp_path):
+    model_dir, _manifest = _make_fingerprinted_q2_model_bundle(
+        tiny_config, tmp_path / "tokenizer-drift-model"
+    )
+    tokenizer_path = model_dir / "tokenizer.json"
+    tokenizer_path.write_bytes(tokenizer_path.read_bytes() + b"\\n")
+
+    with pytest.raises(ValueError, match="Tokenizer SHA-256"):
+        load_model(model_dir, device="cpu")
