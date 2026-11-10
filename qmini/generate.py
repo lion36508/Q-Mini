@@ -181,6 +181,10 @@ def _encode_generation_prompt_ids(
     serialized_prompt: bool = False,
 ) -> list[int]:
     """Encode a prompt without allowing untrusted text to forge control-token IDs."""
+    if not isinstance(prompt, str):
+        raise TypeError("prompt must be a string.")
+    if not isinstance(serialized_prompt, bool):
+        raise TypeError("serialized_prompt must be a boolean.")
     safe_prompt = prompt if serialized_prompt else escape_special_token_literals(prompt)
     return tokenizer.encode(safe_prompt).ids
 
