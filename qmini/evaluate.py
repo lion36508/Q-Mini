@@ -539,6 +539,7 @@ def evaluate_conversation_file(
         tokenizer.token_to_id(token) is not None for token in required_tokens
     )
     from .generate import _complete_chat_turns, trim_chat_history
+    from .text import escape_special_token_literals
 
     was_training = model.training
     model.eval()
@@ -561,15 +562,16 @@ def evaluate_conversation_file(
             for conversation in _conversation_records(dataset_path):
                 if limit is not None and conversations >= limit:
                     break
+                safe_system = escape_special_token_literals(conversation["system"])
                 if has_control_tokens:
                     history = (
-                        f"<|system|>{conversation['system']}\n<|end|>\n"
-                        if conversation["system"] else ""
+                        f"<|system|>{safe_system}\n<|end|>\n"
+                        if safe_system else ""
                     )
                 else:
-                    if conversation["system"]:
+                    if safe_system:
                         history = (
-                            f"[SYSTEM]\n{conversation['system']}\n\n"
+                            f"[SYSTEM]\n{safe_system}\n\n"
                         )
                     else:
                         history = ""
@@ -578,10 +580,11 @@ def evaluate_conversation_file(
                     _system_before, previous_turns = _complete_chat_turns(
                         history, has_control_tokens
                     )
+                    safe_user = escape_special_token_literals(turn["user"])
                     user_block = (
-                        f"<|user|>{turn['user']}\n<|end|>\n<|assistant|>"
+                        f"<|user|>{safe_user}\n<|end|>\n<|assistant|>"
                         if has_control_tokens
-                        else f"[USER]\n{turn['user']}\n[ASSISTANT]\n"
+                        else f"[USER]\n{safe_user}\n[ASSISTANT]\n"
                     )
                     prompt = history + user_block
                     if len(tokenizer.encode(prompt).ids) > model.config.max_context:
@@ -664,10 +667,11 @@ def evaluate_conversation_file(
                         "history_turns_dropped_before_turn": dropped_history_turns,
                     })
 
+                    safe_prediction = escape_special_token_literals(prediction)
                     if has_control_tokens:
-                        history = prompt + prediction + "\n<|end|>\n"
+                        history = prompt + safe_prediction + "\n<|end|>\n"
                     else:
-                        history = prompt + prediction + "\n"
+                        history = prompt + safe_prediction + "\n"
                     conversations += int(turn_index == len(conversation["turns"]))
 
     finally:
