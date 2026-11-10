@@ -147,8 +147,19 @@ def load_model(model_dir: str | Path, device: str | None = None):
         model.to(target).eval()
 
     tokenizer_path = root / "tokenizer.json"
+    if is_final_v2:
+        expected_tokenizer_hash = manifest.get("tokenizer_sha256")
+        if not isinstance(expected_tokenizer_hash, str) or len(expected_tokenizer_hash) != 64:
+            raise ValueError("Final-model manifest must contain a tokenizer SHA-256 fingerprint.")
+        if not tokenizer_path.is_file():
+            raise FileNotFoundError("Final-model bundle is missing its fingerprinted tokenizer.json.")
+        if _sha256_file(tokenizer_path) != expected_tokenizer_hash:
+            raise ValueError(
+                "Tokenizer SHA-256 differs from the tokenizer used for training. "
+                "Restore the matching tokenizer.json for this model."
+            )
     tokenizer = load_tokenizer(tokenizer_path)
-    if manifest is not None:
+    if manifest is not None and not is_final_v2:
         expected_tokenizer_hash = manifest.get("tokenizer_sha256")
         if expected_tokenizer_hash:
             if _sha256_file(tokenizer_path) != expected_tokenizer_hash:
