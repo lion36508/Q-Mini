@@ -62,6 +62,16 @@ jobs:
           PY
       - name: Run tests
         run: pytest -q
+      - name: Audit FP32 and low-precision source paths
+        run: |
+          python scripts/precision_audit.py \
+            --output /tmp/qmini-precision-audit.json
+      - name: Upload precision audit
+        uses: actions/upload-artifact@v7
+        with:
+          name: qmini-precision-audit
+          path: /tmp/qmini-precision-audit.json
+          if-no-files-found: error
       - name: Verify wheel contains native kernel source
         run: |
           python -m pip wheel . --no-deps --no-build-isolation -w /tmp/qmini-wheel
