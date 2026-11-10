@@ -50,7 +50,7 @@ def train_tokenizer(
     trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
         min_frequency=min_frequency,
-        special_tokens=SPECIAL_TOKENS,
+        special_tokens=list(SPECIAL_TOKENS),
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
         show_progress=True,
     )
