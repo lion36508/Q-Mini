@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -653,4 +654,15 @@ def test_release_provenance_is_bound_to_tokenizer_and_prepared_dataset(tmp_path)
             prepared_dir / "train.mask.bin",
             prepared_dir / "valid.mask.bin",
             tokenizer.get_vocab_size(),
+        )
+
+    Path(str(tokenizer_path) + ".qmini.json").unlink()
+    with pytest.raises(ValueError, match="tokenizer provenance sidecar"):
+        prepare_token_streams(
+            [corpus],
+            tokenizer_path,
+            tmp_path / "prepared-without-sidecar",
+            valid_fraction=0.25,
+            source_metadata_path=metadata,
+            release_mode=True,
         )
