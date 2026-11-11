@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -504,3 +505,164 @@ def test_escaped_reserved_text_does_not_encode_as_control_token_ids(tmp_path):
         if tokenizer.token_to_id(token) is not None
     }
     assert encoded_ids.isdisjoint(reserved_ids)
+
+
+def test_release_source_provenance_is_deterministic_and_rejects_unknown_license(tmp_path):
+    import json
+    from qmini.data import build_source_provenance
+
+    corpus = tmp_path / "licensed-corpus.txt"
+    corpus.write_text("First distinct document.\n\nSecond distinct document.\n", encoding="utf-8")
+    metadata = tmp_path / "sources.json"
+    payload = {
+        "format": "qmini-source-provenance-v1",
+        "sources": [{
+            "path": corpus.name,
+            "source_name": "Example public-domain research corpus",
+            "source_uri": "https://example.org/corpus",
+            "license_spdx": "CC-BY-4.0",
+            "collected_at": "2026-11-10",
+            "language": "en",
+            "transformation_version": "raw-v1",
+        }],
+    }
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    files_a, digest_a, screened_a = build_source_provenance(
+        [corpus], metadata_path=metadata, release_mode=True
+    )
+    files_b, digest_b, screened_b = build_source_provenance(
+        [corpus], metadata_path=metadata, release_mode=True
+    )
+    assert digest_a == digest_b
+    assert files_a == files_b
+    assert screened_a == screened_b == 0
+    assert files_a[0]["license_spdx"] == "CC-BY-4.0"
+    assert files_a[0]["sha256"]
+    assert files_a[0]["size_bytes"] == corpus.stat().st_size
+
+    payload["sources"][0]["license_spdx"] = "UNKNOWN"
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown or unapproved license"):
+        build_source_provenance([corpus], metadata_path=metadata, release_mode=True)
+
+
+def test_release_source_provenance_blocks_pii_without_logging_raw_content(tmp_path):
+    import json
+    from qmini.data import build_source_provenance
+
+    corpus = tmp_path / "pii-corpus.txt"
+    private_value = "private.person@example.org"
+    corpus.write_text(
+        "A document containing " + private_value + " must not enter a release corpus.\n",
+        encoding="utf-8",
+    )
+    metadata = tmp_path / "sources.json"
+    metadata.write_text(json.dumps({
+        "format": "qmini-source-provenance-v1",
+        "sources": [{
+            "path": corpus.name,
+            "source_name": "Test corpus",
+            "source_uri": "https://example.org/corpus",
+            "license_spdx": "MIT",
+            "collected_at": "2026-11-10",
+            "language": "en",
+            "transformation_version": "raw-v1",
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="potential PII/secrets") as error:
+        build_source_provenance([corpus], metadata_path=metadata, release_mode=True)
+    assert private_value not in str(error.value)
+
+
+def test_release_provenance_is_bound_to_tokenizer_and_prepared_dataset(tmp_path):
+    import json
+    from qmini.data import prepare_token_streams
+    from qmini.tokenizer import train_tokenizer
+
+    corpus = tmp_path / "release-corpus.txt"
+    corpus.write_text(
+        "Q-Mini trains only from random initialization.\n\n"
+        "Every data source needs a recorded license and transformation.\n\n"
+        "Validation documents stay separate from tokenizer fitting.\n",
+        encoding="utf-8",
+    )
+    metadata = tmp_path / "sources.json"
+    metadata.write_text(json.dumps({
+        "format": "qmini-source-provenance-v1",
+        "sources": [{
+            "path": corpus.name,
+            "source_name": "Q-Mini release-gate fixture",
+            "source_uri": "https://example.org/qmini-fixture",
+            "license_spdx": "CC0-1.0",
+            "collected_at": "2026-11-10",
+            "language": "en",
+            "transformation_version": "fixture-v1",
+        }],
+    }), encoding="utf-8")
+
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer = train_tokenizer(
+        [corpus],
+        tokenizer_path,
+        vocab_size=300,
+        min_frequency=1,
+        validation_fraction=0.25,
+        source_metadata_path=metadata,
+        release_mode=True,
+    )
+    tokenizer_manifest = json.loads(
+        (tmp_path / "tokenizer.json.qmini.json").read_text(encoding="utf-8")
+    )
+    assert tokenizer_manifest["release_mode"] is True
+    assert tokenizer_manifest["source_provenance_sha256"]
+
+    report = prepare_token_streams(
+        [corpus],
+        tokenizer_path,
+        tmp_path / "prepared",
+        valid_fraction=0.25,
+        source_metadata_path=metadata,
+        release_mode=True,
+    )
+    assert report["release_mode"] is True
+    assert report["source_provenance_sha256"] == tokenizer_manifest["source_provenance_sha256"]
+    assert report["source_files"][0]["document_count"] == 3
+    assert report["source_files"][0]["license_spdx"] == "CC0-1.0"
+
+    from qmini.train import _verify_prepared_dataset_manifest
+    prepared_dir = tmp_path / "prepared"
+    assert _verify_prepared_dataset_manifest(
+        prepared_dir / "train.bin",
+        prepared_dir / "valid.bin",
+        tokenizer_path,
+        prepared_dir / "train.mask.bin",
+        prepared_dir / "valid.mask.bin",
+        tokenizer.get_vocab_size(),
+    ) == prepared_dir / "dataset.json"
+
+    manifest_path = prepared_dir / "dataset.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_files"][0]["license_spdx"] = "MIT"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="source provenance hash is invalid"):
+        _verify_prepared_dataset_manifest(
+            prepared_dir / "train.bin",
+            prepared_dir / "valid.bin",
+            tokenizer_path,
+            prepared_dir / "train.mask.bin",
+            prepared_dir / "valid.mask.bin",
+            tokenizer.get_vocab_size(),
+        )
+
+    Path(str(tokenizer_path) + ".qmini.json").unlink()
+    with pytest.raises(ValueError, match="tokenizer provenance sidecar"):
+        prepare_token_streams(
+            [corpus],
+            tokenizer_path,
+            tmp_path / "prepared-without-sidecar",
+            valid_fraction=0.25,
+            source_metadata_path=metadata,
+            release_mode=True,
+        )

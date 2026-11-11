@@ -175,6 +175,14 @@ def main() -> int:
         "--near-duplicate-hamming-distance", type=int, choices=range(0, 4), default=0,
         help="group near-duplicate documents before tokenizer split; 0 disables SimHash grouping",
     )
+    tok.add_argument(
+        "--source-metadata",
+        help="JSON source/license manifest in qmini-source-provenance-v1 format",
+    )
+    tok.add_argument(
+        "--release-mode", action="store_true",
+        help="require explicit source provenance/licenses and block records with likely PII/secrets",
+    )
     tok.add_argument("--overwrite", action="store_true")
     def do_tokenizer(args):
         from .tokenizer import train_tokenizer
@@ -182,6 +190,8 @@ def main() -> int:
             args.data_dir, args.output, args.vocab_size, args.min_frequency,
             args.overwrite, validation_fraction=args.valid_fraction,
             near_duplicate_distance=args.near_duplicate_hamming_distance,
+            source_metadata_path=args.source_metadata,
+            release_mode=args.release_mode,
         )
         cfg = QMiniConfig.from_json(args.base_config); cfg.vocab_size = t.get_vocab_size(); cfg.validate(); cfg.save(args.config_output)
         print("Tokenizer:", args.output, "vocab:", cfg.vocab_size, "config:", args.config_output); return 0
@@ -199,11 +209,21 @@ def main() -> int:
         "--near-duplicate-hamming-distance", type=int, choices=range(0, 4), default=0,
         help="keep similar documents in the same split; 0 uses exact-deduplication only",
     )
+    prep.add_argument(
+        "--source-metadata",
+        help="JSON source/license manifest in qmini-source-provenance-v1 format",
+    )
+    prep.add_argument(
+        "--release-mode", action="store_true",
+        help="require explicit source provenance/licenses and block records with likely PII/secrets",
+    )
     prep.set_defaults(func=lambda a: (
         print(json.dumps(prepare_token_streams(
             a.data_dir, a.tokenizer, a.output_dir, a.valid_fraction, a.loss_mask,
             include_absolute_source_paths=a.include_absolute_source_paths,
             near_duplicate_distance=a.near_duplicate_hamming_distance,
+            source_metadata_path=a.source_metadata,
+            release_mode=a.release_mode,
         ), indent=2)) or 0
     ))
     train = commands.add_parser("train", help="train from scratch or resume a checkpoint")

@@ -7,8 +7,10 @@ import os
 import re
 import sqlite3
 import tempfile
+from datetime import date
 from pathlib import Path
 from typing import Iterable, Iterator
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -692,6 +694,151 @@ def _file_manifest(
     return result
 
 
+
+def build_source_provenance(
+    paths: Iterable[str | Path],
+    metadata_path: str | Path | None = None,
+    release_mode: bool = False,
+) -> tuple[list[dict[str, object]], str, int | None]:
+    """Build a stable source/license manifest and optionally enforce release gates.
+
+    Metadata JSON format:
+      {"format":"qmini-source-provenance-v1","sources":[
+        {"path":"corpus.jsonl","source_name":"...","source_uri":"https://...",
+         "license_spdx":"CC-BY-4.0","collected_at":"2026-11-10",
+         "language":"en","transformation_version":"raw-v1"}]}
+    Paths are matched by basename. Duplicate basenames are rejected to avoid
+    ambiguous provenance. Research mode records unknown provenance explicitly;
+    release mode rejects unknown fields and scans records for likely PII/secrets.
+    """
+    source_paths = expand_data_paths(paths)
+    if not source_paths:
+        raise FileNotFoundError("No supported dataset files were found.")
+    names = [path.name for path in source_paths]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            "Dataset files have duplicate basenames; use unique filenames so source provenance is unambiguous."
+        )
+
+    supplied: dict[str, dict[str, object]] = {}
+    if metadata_path is not None:
+        metadata_file = Path(metadata_path).expanduser()
+        if not metadata_file.is_file():
+            raise FileNotFoundError(f"Source metadata file not found: {metadata_file}")
+        try:
+            payload = json.loads(metadata_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Source metadata must be valid UTF-8 JSON.") from exc
+        if not isinstance(payload, dict) or payload.get("format") != "qmini-source-provenance-v1":
+            raise ValueError("Unsupported source metadata format; expected qmini-source-provenance-v1.")
+        records = payload.get("sources")
+        if not isinstance(records, list):
+            raise ValueError("Source metadata must contain a 'sources' array.")
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("Each source metadata entry must be a JSON object.")
+            name = record.get("path")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Each source metadata entry requires a non-empty 'path' basename.")
+            name = Path(name).name
+            if name in supplied:
+                raise ValueError(f"Duplicate source metadata entry for {name!r}.")
+            supplied[name] = record
+        extras = sorted(set(supplied) - set(names))
+        if extras:
+            raise ValueError(
+                "Source metadata references files that are not in this dataset input: "
+                + ", ".join(extras)
+            )
+    elif release_mode:
+        raise ValueError("Release mode requires --source-metadata with explicit source licenses.")
+
+    base_files = _file_manifest(source_paths)
+    result: list[dict[str, object]] = []
+    for base in base_files:
+        name = str(base["path"])
+        record = supplied.get(name, {})
+        fields = {
+            "source_name": record.get("source_name") or name,
+            "source_uri": record.get("source_uri"),
+            "license_spdx": record.get("license_spdx") or "UNKNOWN",
+            "collected_at": record.get("collected_at"),
+            "language": record.get("language") or "und",
+            "transformation_version": record.get("transformation_version") or "unknown",
+        }
+        if release_mode:
+            required_fields = (
+                "source_name", "source_uri", "license_spdx",
+                "collected_at", "language", "transformation_version",
+            )
+            missing = [
+                key for key in required_fields
+                if not isinstance(record.get(key), str) or not record[key].strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"Release provenance for {name!r} is missing: {', '.join(missing)}."
+                )
+            license_value = str(fields["license_spdx"]).strip()
+            if (
+                license_value.casefold() in {"unknown", "unlicensed", "none", "n/a"}
+                or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9.+-]*(?:\s+(?:AND|OR|WITH)\s+[A-Za-z0-9][A-Za-z0-9.+-]*)*",
+                    license_value,
+                )
+            ):
+                raise ValueError(
+                    f"Release dataset rejects an unknown or unapproved license "
+                    f"(or malformed SPDX expression) for {name!r}."
+                )
+            uri = urlsplit(str(fields["source_uri"]))
+            if uri.scheme not in {"http", "https"} or not uri.netloc or uri.username or uri.password:
+                raise ValueError(f"Release provenance for {name!r} needs a public HTTP(S) source URI.")
+            try:
+                date.fromisoformat(str(fields["collected_at"]))
+            except ValueError as exc:
+                raise ValueError(
+                    f"Release provenance for {name!r} needs an ISO-8601 collection date."
+                ) from exc
+            language = str(fields["language"])
+            if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", language):
+                raise ValueError(f"Release provenance for {name!r} needs a BCP-47 language tag.")
+            if not str(fields["transformation_version"]).strip():
+                raise ValueError(f"Release provenance for {name!r} needs a transformation version.")
+        result.append({**base, **fields, "document_count": None})
+
+    sensitive_records: int | None = None
+    if release_mode:
+        email_pattern = re.compile(
+            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9_-])"
+        )
+        secret_patterns = (
+            re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+            re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+            re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+            re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"),
+        )
+        sensitive_records = 0
+        for path in source_paths:
+            for record in iter_source_records([path]):
+                text = extract_text(record)
+                if email_pattern.search(text) or any(
+                    pattern.search(text) for pattern in secret_patterns
+                ):
+                    sensitive_records += 1
+        if sensitive_records:
+            raise ValueError(
+                f"Release dataset blocked: {sensitive_records} records contain potential PII/secrets. "
+                "No raw content was logged; remove or quarantine flagged records before retrying."
+            )
+
+    canonical = json.dumps(
+        result, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    provenance_sha256 = hashlib.sha256(canonical).hexdigest()
+    return result, provenance_sha256, sensitive_records
+
+
 def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
     temporary = path.with_name(path.name + ".tmp")
     try:
@@ -713,6 +860,8 @@ def prepare_token_streams(
     loss_mask_mode: str = "auto",
     include_absolute_source_paths: bool = False,
     near_duplicate_distance: int = 0,
+    source_metadata_path: str | Path | None = None,
+    release_mode: bool = False,
 ) -> dict[str, object]:
     """Prepare deduplicated train/validation token and assistant-loss-mask streams.
 
@@ -732,6 +881,11 @@ def prepare_token_streams(
     paths = expand_data_paths(data_paths)
     if not paths:
         raise FileNotFoundError("No supported dataset files were found.")
+    provenance_files, source_provenance_sha256, sensitive_records_screened = (
+        build_source_provenance(
+            paths, metadata_path=source_metadata_path, release_mode=release_mode
+        )
+    )
 
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
@@ -749,6 +903,11 @@ def prepare_token_streams(
     tokenizer_path_obj = Path(tokenizer_path)
     tokenizer = load_tokenizer(tokenizer_path_obj)
     tokenizer_sidecar = Path(str(tokenizer_path_obj) + ".qmini.json")
+    if release_mode and not tokenizer_sidecar.is_file():
+        raise ValueError(
+            "Release preparation requires the matching tokenizer provenance sidecar; "
+            "retrain the tokenizer with --release-mode and the same --source-metadata."
+        )
     if tokenizer_sidecar.is_file():
         try:
             sidecar = json.loads(tokenizer_sidecar.read_text(encoding="utf-8"))
@@ -770,6 +929,18 @@ def prepare_token_streams(
             )
         if sidecar.get("tokenizer_sha256") != _sha256_file(tokenizer_path_obj):
             raise ValueError("Tokenizer file does not match its Q-Mini split manifest.")
+        if release_mode and sidecar.get("release_mode") is not True:
+            raise ValueError(
+                "Release preparation requires a tokenizer fitted with --release-mode "
+                "so source licenses and PII/secrets were checked before BPE training."
+            )
+        saved_provenance = sidecar.get("source_provenance_sha256")
+        provenance_enforced = release_mode or source_metadata_path is not None
+        if provenance_enforced and saved_provenance != source_provenance_sha256:
+            raise ValueError(
+                "Tokenizer source provenance differs from prepared data. Rebuild the tokenizer "
+                "with the same source metadata and source files."
+            )
     bos_id = special_token_id(tokenizer, "<bos>")
     eos_id = special_token_id(tokenizer, "<eos>")
     vocab_size = tokenizer.get_vocab_size()
@@ -813,19 +984,23 @@ def prepare_token_streams(
 
         # First pass: exact duplicates and optional near-duplicate groups are
         # indexed on disk, never retained as a Python list in memory.
+        for source in provenance_files:
+            source["document_count"] = 0
         with connection:
-            for record in iter_source_records(paths):
-                normalized = extract_text(record).strip()
-                if len(normalized) < 2:
-                    stats["skipped_short_documents"] += 1
-                    continue
-                _digest, inserted = _register_document(
-                    connection, normalized, near_duplicate_distance
-                )
-                if inserted:
-                    stats["unique_documents"] += 1
-                else:
-                    stats["duplicate_documents"] += 1
+            for source_index, source_path in enumerate(paths):
+                for record in iter_source_records([source_path]):
+                    normalized = extract_text(record).strip()
+                    if len(normalized) < 2:
+                        stats["skipped_short_documents"] += 1
+                        continue
+                    provenance_files[source_index]["document_count"] += 1
+                    _digest, inserted = _register_document(
+                        connection, normalized, near_duplicate_distance
+                    )
+                    if inserted:
+                        stats["unique_documents"] += 1
+                    else:
+                        stats["duplicate_documents"] += 1
 
         unique_count = int(stats["unique_documents"])
         if unique_count < 2:
@@ -846,50 +1021,51 @@ def prepare_token_streams(
             temp_outputs[2].open("wb") as train_mask_file,
             temp_outputs[3].open("wb") as valid_mask_file,
         ):
-            for record in iter_source_records(paths):
-                normalized = extract_text(record).strip()
-                if len(normalized) < 2:
-                    continue
-                digest = hashlib.sha256(
-                    _encode_dataset_text(normalized)
-                ).digest()
-                if connection.execute(
-                    "SELECT 1 FROM documents WHERE digest=?", (digest,)
-                ).fetchone() is None:
-                    raise RuntimeError("Source data changed during token preparation.")
-                inserted = connection.execute(
-                    "INSERT OR IGNORE INTO written(digest) VALUES (?)", (digest,)
-                )
-                if inserted.rowcount == 0:
-                    continue
-                is_validation = _document_is_validation(connection, digest)
+            for source_path in paths:
+                for record in iter_source_records([source_path]):
+                    normalized = extract_text(record).strip()
+                    if len(normalized) < 2:
+                        continue
+                    digest = hashlib.sha256(
+                        _encode_dataset_text(normalized)
+                    ).digest()
+                    if connection.execute(
+                        "SELECT 1 FROM documents WHERE digest=?", (digest,)
+                    ).fetchone() is None:
+                        raise RuntimeError("Source data changed during token preparation.")
+                    inserted = connection.execute(
+                        "INSERT OR IGNORE INTO written(digest) VALUES (?)", (digest,)
+                    )
+                    if inserted.rowcount == 0:
+                        continue
+                    is_validation = _document_is_validation(connection, digest)
 
-                encoded = _encode_record(
-                    record, tokenizer, bos_id, eos_id, loss_mask_mode
-                )
-                if encoded is None:
-                    stats["skipped_without_targets"] += 1
-                    continue
-                token_ids, loss_mask = encoded
-                if token_ids.size and int(token_ids.max()) >= vocab_size:
-                    raise ValueError("Tokenizer emitted an ID outside its declared vocabulary.")
-                if token_ids.size != loss_mask.size:
-                    raise RuntimeError("Token and loss-mask lengths do not match.")
-                if not np.isin(loss_mask, (0, 1)).all():
-                    raise RuntimeError("Loss mask must contain only binary values.")
+                    encoded = _encode_record(
+                        record, tokenizer, bos_id, eos_id, loss_mask_mode
+                    )
+                    if encoded is None:
+                        stats["skipped_without_targets"] += 1
+                        continue
+                    token_ids, loss_mask = encoded
+                    if token_ids.size and int(token_ids.max()) >= vocab_size:
+                        raise ValueError("Tokenizer emitted an ID outside its declared vocabulary.")
+                    if token_ids.size != loss_mask.size:
+                        raise RuntimeError("Token and loss-mask lengths do not match.")
+                    if not np.isin(loss_mask, (0, 1)).all():
+                        raise RuntimeError("Loss mask must contain only binary values.")
 
-                if is_validation:
-                    token_ids.tofile(valid_file)
-                    loss_mask.tofile(valid_mask_file)
-                    stats["valid_tokens"] += int(token_ids.size)
-                    stats["valid_target_tokens"] += int(loss_mask.sum())
-                    stats["valid_documents"] += 1
-                else:
-                    token_ids.tofile(train_file)
-                    loss_mask.tofile(train_mask_file)
-                    stats["train_tokens"] += int(token_ids.size)
-                    stats["train_target_tokens"] += int(loss_mask.sum())
-                    stats["train_documents"] += 1
+                    if is_validation:
+                        token_ids.tofile(valid_file)
+                        loss_mask.tofile(valid_mask_file)
+                        stats["valid_tokens"] += int(token_ids.size)
+                        stats["valid_target_tokens"] += int(loss_mask.sum())
+                        stats["valid_documents"] += 1
+                    else:
+                        token_ids.tofile(train_file)
+                        loss_mask.tofile(train_mask_file)
+                        stats["train_tokens"] += int(token_ids.size)
+                        stats["train_target_tokens"] += int(loss_mask.sum())
+                        stats["train_documents"] += 1
 
             for handle in (train_file, valid_file, train_mask_file, valid_mask_file):
                 handle.flush()
@@ -929,7 +1105,23 @@ def prepare_token_streams(
             ),
             "near_duplicate_hamming_distance": near_duplicate_distance,
             "absolute_source_paths_included": bool(include_absolute_source_paths),
-            "source_files": source_manifest_before,
+            "source_files": [
+                {
+                    **entry,
+                    "source_name": provenance["source_name"],
+                    "source_uri": provenance["source_uri"],
+                    "license_spdx": provenance["license_spdx"],
+                    "collected_at": provenance["collected_at"],
+                    "language": provenance["language"],
+                    "transformation_version": provenance["transformation_version"],
+                    "document_count": provenance["document_count"],
+                }
+                for entry, provenance in zip(source_manifest_before, provenance_files)
+            ],
+            "source_provenance_sha256": source_provenance_sha256,
+            "source_provenance_enforced": bool(release_mode or source_metadata_path is not None),
+            "release_mode": bool(release_mode),
+            "sensitive_records_screened": sensitive_records_screened,
             "corpus_sha256": hashlib.sha256(corpus_descriptor).hexdigest(),
             "tokenizer_sha256": _sha256_file(tokenizer_path_obj),
             "train_tokens_sha256": _sha256_file(train_path),

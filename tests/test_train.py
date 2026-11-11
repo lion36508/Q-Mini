@@ -716,3 +716,36 @@ def test_finetuning_rejects_non_object_source_manifest(tmp_path, tiny_config):
             init_from=source_dir / "model.pt",
         )
 
+
+
+def test_resume_contract_binds_the_complete_dataset_manifest(tmp_path):
+    from qmini.train import _resume_contract
+
+    train = tmp_path / "train.bin"
+    valid = tmp_path / "valid.bin"
+    tokenizer = tmp_path / "tokenizer.json"
+    dataset_manifest = tmp_path / "dataset.json"
+    train.write_bytes(b"\x01\x00\x02\x00")
+    valid.write_bytes(b"\x03\x00\x04\x00")
+    tokenizer.write_text("tokenizer-v1", encoding="utf-8")
+    dataset_manifest.write_text(
+        '{"source_provenance_sha256":"first","release_mode":true}',
+        encoding="utf-8",
+    )
+
+    def make_contract():
+        return _resume_contract(
+            train, valid, tokenizer, None, None,
+            batch_size=1, seq_len=2, grad_accum=1,
+            learning_rate=1e-3, weight_decay=0.0, seed=42,
+            dataset_manifest_path=dataset_manifest,
+        )
+
+    first = make_contract()
+    assert first["dataset_manifest"]["sha256"]
+    dataset_manifest.write_text(
+        '{"source_provenance_sha256":"second","release_mode":true}',
+        encoding="utf-8",
+    )
+    second = make_contract()
+    assert first["dataset_manifest"] != second["dataset_manifest"]
