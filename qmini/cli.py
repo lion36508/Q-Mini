@@ -1,5 +1,5 @@
 from __future__ import annotations
-import argparse, json, platform, shutil
+import argparse, json, platform, shutil, sys
 import torch
 from .config import QMiniConfig
 from .data import prepare_token_streams
@@ -272,13 +272,33 @@ def main() -> int:
     gen.add_argument("--max-new-tokens", type=int, default=128); gen.add_argument("--temperature", type=float, default=0.8)
     gen.add_argument("--top-k", type=int, default=40); gen.add_argument("--top-p", type=float, default=0.9)
     gen.add_argument("--thinking-steps", type=int); gen.add_argument("--device", default=None)
+    gen.add_argument("--frequency-penalty", type=float, default=0.0)
+    gen.add_argument("--presence-penalty", type=float, default=0.0)
+    gen.add_argument(
+        "--serialized-prompt",
+        action="store_true",
+        help="Trust Q-Mini control-token markers in the prompt (unsafe for untrusted text).",
+    )
     def do_generate(a):
         model, tokenizer, _ = load_model(a.model_dir, a.device)
         try:
             _validate_thinking_steps(a.thinking_steps, model.config.max_thinking_steps)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        print(generate(model, tokenizer, a.prompt, a.max_new_tokens, a.temperature, a.top_k, a.top_p, a.thinking_steps)); return 0
+        if a.serialized_prompt:
+            print(
+                "WARNING: --serialized-prompt trusts role/control-token markers in "
+                "the supplied prompt. Use only with prompts produced by Q-Mini's "
+                "trusted serializer.",
+                file=sys.stderr,
+            )
+        print(generate(
+            model, tokenizer, a.prompt, a.max_new_tokens, a.temperature,
+            a.top_k, a.top_p, a.thinking_steps,
+            serialized_prompt=a.serialized_prompt,
+            frequency_penalty=a.frequency_penalty,
+            presence_penalty=a.presence_penalty,
+        )); return 0
     gen.set_defaults(func=do_generate)
     verify_export = commands.add_parser("verify-export", help="validate a packed Q-Mini NPZ export")
     verify_export.add_argument("--path", required=True)

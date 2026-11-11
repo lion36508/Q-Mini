@@ -392,21 +392,21 @@ def _verify_initial_model_artifact(
     from .export import verify_packed_export
 
     packed_report = verify_packed_export(packed_path)
-    if packed_report.get("parameter_count") != expected_parameters:
-        raise ValueError("Q-Mini packed export parameter count does not match its config.")
+    if (
+        packed_report.get("format") != "qmini-packed-v2"
+        or packed_report.get("q2_version") != 2
+        or packed_report.get("parameter_count") != expected_parameters
+    ):
+        raise ValueError(
+            "Q-Mini SFT source must contain a verified Q2-v2 two-bit packed export "
+            "with the expected parameter count."
+        )
 
     if source_path.suffix.lower() == ".pt":
-        expected_path = (source_dir / "model.pt").resolve()
-        if source_path != expected_path or manifest.get("dense_training_snapshot_included") is not True:
-            raise ValueError(
-                "Dense SFT initialization must use the manifest-listed final_model/model.pt."
-            )
-        dense_fingerprint = _sha256_file(source_path)
-        if (
-            manifest.get("dense_snapshot_sha256") != dense_fingerprint["sha256"]
-            or manifest.get("dense_snapshot_bytes") != dense_fingerprint["size_bytes"]
-        ):
-            raise ValueError("Q-Mini dense snapshot SHA-256/size does not match its manifest.")
+        raise ValueError(
+            "Dense .pt SFT initialization is disabled: current Q-Mini final-model "
+            "exports are Q2-v2 .npz-only. Use the manifest-listed model.qmini.npz."
+        )
     elif source_path.suffix.lower() == ".npz":
         if source_path != packed_path.resolve():
             raise ValueError(
@@ -414,7 +414,7 @@ def _verify_initial_model_artifact(
             )
     else:
         raise ValueError(
-            "SFT --init-from accepts only a verified final_model/model.pt or "
+            "SFT --init-from accepts only the manifest-listed Q2-v2 "
             "final_model/model.qmini.npz artifact."
         )
 
@@ -1294,8 +1294,8 @@ def train_model(
     packed_report = verify_packed_export(packed_path)
     if packed_report.get("format") != "qmini-packed-v2" or packed_report.get("q2_version") != 2:
         raise RuntimeError("Final deployment export is not verified Q2-v2.")
-    legacy_dense_snapshot_preserved = (final_dir / "model.pt").is_file()
-
+    # Older model.pt files, if present, are left untouched for manual recovery
+    # but are not part of this final-model manifest or accepted as SFT sources.
     packed_fingerprint = _sha256_file(packed_path)
     dense_snapshot_fingerprint = None
     trainable_parameter_dtypes = sorted({str(parameter.dtype) for parameter in model.parameters()})
@@ -1347,7 +1347,6 @@ def train_model(
             config.estimated_packed_export_bytes() <= 1_500_000_000
         ),
         "dense_training_snapshot_included": False,
-        "legacy_dense_snapshot_preserved": legacy_dense_snapshot_preserved,
         "resume_checkpoint": str(checkpoint_path),
         "config": config.to_dict(),
     }

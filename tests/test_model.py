@@ -438,3 +438,65 @@ def test_shared_refinement_parameters_receive_gradients_at_every_step_count(
         assert all(gradient is not None for gradient in gradients)
         assert all(torch.isfinite(gradient).all() for gradient in gradients)
         assert sum(float(gradient.abs().sum()) for gradient in gradients) > 0.0
+
+
+@pytest.mark.parametrize("use_state_space", [False, True])
+def test_batched_prefill_matches_tokenwise_streaming(tiny_config, use_state_space):
+    values = tiny_config.to_dict()
+    values["use_state_space"] = use_state_space
+    config = QMiniConfig.from_dict(values)
+    model = QMiniMoE(config).eval()
+    tokens = torch.randint(0, config.vocab_size, (2, 19))
+    with torch.inference_mode():
+        prefill_result, prefill_state = model.prefill(tokens, thinking_steps=2)
+        stream_state = None
+        streamed_logits = []
+        for position in range(tokens.shape[1]):
+            result, stream_state = model.forward_step(
+                tokens[:, position], state=stream_state, thinking_steps=2
+            )
+            streamed_logits.append(result["logits"])
+        incremental = torch.stack(streamed_logits, dim=1)
+
+    assert torch.allclose(
+        prefill_result["logits"], incremental[:, -1, :], atol=5e-5, rtol=5e-5
+    )
+    assert prefill_state.tokens_processed == tokens.shape[1]
+    assert stream_state is not None
+    assert prefill_state.tokens_processed == stream_state.tokens_processed
+    for actual, expected in zip(prefill_state.caches, stream_state.caches):
+        assert actual is not None and expected is not None
+        assert torch.allclose(actual, expected, atol=5e-5, rtol=5e-5)
+    for actual, expected in zip(prefill_state.state_spaces, stream_state.state_spaces):
+        if expected is None:
+            assert actual is None
+        else:
+            assert actual is not None
+            assert torch.allclose(actual, expected, atol=5e-5, rtol=5e-5)
+
+
+def test_top1_grouped_dispatch_matches_reference_expert_loop(tiny_config):
+    torch.manual_seed(404)
+    model = QMiniMoE(tiny_config).eval()
+    moe = model.blocks[0].moe
+    x = torch.randn(2, 7, tiny_config.d_model, requires_grad=True)
+    shape = x.shape
+    flat = x.reshape(-1, shape[-1])
+    probabilities = torch.softmax(moe.router(moe.router_norm(x)).float(), dim=-1)
+    flat_probs = probabilities.reshape(-1, moe.n_experts)
+    selected = flat_probs.argmax(dim=-1)
+    selected_weights = flat_probs.gather(1, selected.unsqueeze(1))
+    reference = torch.zeros_like(flat)
+    for expert_id, expert in enumerate(moe.experts):
+        indices = torch.nonzero(selected == expert_id, as_tuple=False).flatten()
+        if indices.numel():
+            expert_output = expert(flat.index_select(0, indices))
+            gate = selected_weights.index_select(0, indices).to(expert_output.dtype)
+            reference = reference.index_copy(0, indices, expert_output * gate)
+    expected_counts = torch.bincount(selected, minlength=moe.n_experts)
+
+    actual, _aux_loss, counts = moe(x)
+    assert torch.allclose(actual.reshape_as(reference), reference, atol=1e-6, rtol=1e-6)
+    assert torch.equal(counts, expected_counts)
+    actual.square().mean().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()

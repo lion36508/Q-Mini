@@ -197,3 +197,63 @@ These are incomplete features or evidence gaps, not presently demonstrated unit-
 ### Scope and limitations
 
 No large-scale pretraining or SFT was started in this audit. No external pretrained weights were downloaded or loaded. No user dataset was available for license, privacy, language-balance or leakage audit. No CUDA GPU or physical ARM phone was benchmarked. The three CI skips are therefore still real coverage gaps. The current verified result is a passing CPU CI suite and improved checkpoint provenance—not a claim that Q-Mini is already a capable general-purpose assistant or that every open roadmap issue is resolved.
+
+## 8. Follow-up source review — 2026-11-11
+
+### Reviewed main revision
+
+- Public repository: `lion36508/Q-Mini`.
+- Branch reviewed: `main`.
+- Exact base HEAD: `2f995ef642700f6444020b316d2e8da0d042bb5d` (2026-11-10 23:26:21 UTC).
+- The preceding audit evidence above stopped at `90d2c4ddbf886a0ce47318621e22a623e4622a45`; it is historical evidence, not the current HEAD.
+- The source tree still contains configurations and implementation code, not a trained 5M/152M/5B model release or persisted real corpus-based training run. The Colab notebook's code cells have no saved outputs. Its 5M intermediate and 152M long-training flags remain disabled by default.
+
+### Additional defects and risks confirmed at the reviewed HEAD
+
+1. The SFT verifier accepted a dense `.pt` path only when its manifest declared a dense snapshot and matching fingerprint, but the current final export writer always writes `dense_training_snapshot_included=false` with null dense fingerprint fields. A stale legacy `model.pt` could be preserved without becoming a valid SFT source. The safer contract is Q2-v2 packed `.npz`-only SFT; legacy dense files must not be mistaken for verified SFT checkpoints.
+2. The SFT verifier checked packed artifact size/hash and parameter count but did not independently require `format=qmini-packed-v2` and `q2_version=2`, unlike the initial-brain verifier.
+3. A dense-only directory with a non-v2 manifest failed with a generic missing-verified-weights message, which did not explain that the manifest did not fingerprint the legacy dense file.
+4. The generate CLI did not expose the existing trusted serialized-prompt mode. Such mode must be explicit and warn that only programmatically serialized prompts are trusted.
+5. The default Colab learning-proof gate accepted any positive held-out NLL movement, regardless of magnitude, and loaded the expected checkpoint without a clear missing-file diagnostic.
+6. Colab setup used pip `--upgrade` for utility/tokenizer/data packages, which could needlessly replace already-satisfactory runtime packages. The cell-3 architecture preflight source also needed newline restoration so its code was executable rather than appended to its leading comment.
+7. The CI precision scan classifies documented FP32 QAT master/optimizer paths under `training_parameter_or_optimizer`. This category is a review inventory, not a valid fail-closed CI category while that training representation is intentional.
+8. The packed-export verifier/reconstructor assumed well-formed JSON object metadata and archive members; malformed member structures could leak raw `KeyError` or `AttributeError` exceptions.
+
+### Changes prepared on the separate improvement branch
+
+The fixes and regression coverage are being assembled on `gpt/model-improvements`, based on the main SHA above; no changes are made to `main` by this branch work.
+
+- SFT source policy is narrowed to the manifest-listed Q2-v2 `.npz` export. The misleading `legacy_dense_snapshot_preserved` manifest field is removed; any old dense file is left untouched but is not trusted as an SFT source.
+- SFT validation now checks packed format, Q2 version and parameter count.
+- Dense-only legacy bundle errors identify an unfingerprinted manifest.
+- The generate CLI adds an opt-in `--serialized-prompt` with a warning and frequency/presence repetition penalties.
+- Colab's small learning-proof gate requires at least 0.05 held-out cross-entropy improvement; it reports the measured margin and checks for `latest.pt` before loading it. The existing smoke-step, 5M opt-in and `RUN_LONG_TRAINING=False` defaults are preserved.
+- Colab setup no longer uses `pip --upgrade` for the listed runtime dependencies, and the architecture-preflight cell is made executable.
+- The CI precision audit is explicitly informational while FP32 QAT master parameters and optimizer state remain part of training.
+- Export verification/reconstruction normalizes malformed archive member errors to `ValueError`.
+- Generation prompt prefill uses a batched causal-convolution/SSM pass to produce decode caches; MoE dispatch groups token indices after one assignment sort instead of scanning every token once per expert.
+- Tests are added for packed-only SFT, Q2-v2 SFT format checks, repetition penalties, CLI warning behavior, batch-prefill parity, grouped MoE parity, malformed archives, and notebook guards.
+
+### Scope deliberately not claimed
+
+- No training or fine-tuning was started.
+- No trained weights, checkpoints, dataset, benchmark numbers, or Colab outputs were created or inferred.
+- The prefill and MoE code changes are implementation-level optimizations; they are not accompanied by a measured throughput claim until a reproducible benchmark is run.
+- No 5M run design, default flag, Q2 codebook, attention-free architecture, or 1B-related file/folder was intentionally changed.
+- A public CI pass does not substitute for real Colab execution, a licensed corpus review, CUDA numerical stress, or target-phone benchmarking.
+
+
+## 9. Main advanced after the 2026-11-11 review
+
+After the source review at `2f995ef642700f6444020b316d2e8da0d042bb5d`, main advanced to `d75d7157311fb3ea6828b31476e2884ecac42061` on 2026-11-11. That upstream commit adds a first release-mode dataset provenance gate:
+
+- `docs/DATASET_PROVENANCE.md` documents the `qmini-source-provenance-v1` metadata contract.
+- `qmini/data.py` now records source file hashes and provenance fields, supports explicit release mode, and screens for common PII/secret patterns.
+- `qmini/tokenizer.py` binds tokenizer fitting to the dataset provenance hash and release-mode flag.
+- `qmini/cli.py` exposes `--source-metadata` and `--release-mode` on tokenizer/prepare commands.
+- `qmini/train.py` verifies tokenizer/dataset provenance and binds the dataset manifest into the resume contract.
+- `tests/test_data.py` and `tests/test_train.py` add corresponding provenance and resume-contract coverage.
+
+This is a meaningful improvement to data governance, but it remains a first fail-closed screening gate, not complete legal verification or a comprehensive PII scanner. A real corpus still needs manual licensing and privacy review, independent test data and measured language/source quality. No training corpus or training run is implied by the code's presence.
+
+The improvement branch was rebased onto this new main commit rather than deleting or reverting the upstream provenance work. The files `qmini/data.py`, `qmini/tokenizer.py`, `tests/test_data.py`, and `docs/DATASET_PROVENANCE.md` are retained from main unchanged by the improvement set.

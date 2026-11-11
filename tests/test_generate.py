@@ -3,7 +3,7 @@ import torch
 
 from qmini.generate import (
     generate, load_model, trim_chat_history, prepare_chat_prompt,
-    _encode_generation_prompt_ids,
+    _encode_generation_prompt_ids, _apply_repetition_penalties,
 )
 from qmini.model import QMiniMoE
 from qmini.tokenizer import train_tokenizer
@@ -505,8 +505,41 @@ def test_generation_prompt_encoding_rejects_invalid_trust_flag(tiny_config, tmp_
         ({"top_p": True}, TypeError),
         ({"top_p": float("nan")}, ValueError),
         ({"top_p": 1.1}, ValueError),
+        ({"frequency_penalty": True}, TypeError),
+        ({"frequency_penalty": float("inf")}, ValueError),
+        ({"frequency_penalty": 2.1}, ValueError),
+        ({"presence_penalty": -2.1}, ValueError),
     ],
 )
 def test_generation_rejects_malformed_sampling_arguments(kwargs, error):
     with pytest.raises(error):
         generate(None, None, "plain prompt", **kwargs)
+
+
+def test_frequency_and_presence_penalties_apply_to_prior_generated_tokens():
+    logits = torch.tensor([[2.0, 2.0, 2.0, 2.0]])
+    adjusted = _apply_repetition_penalties(
+        logits, [1, 1, 2], frequency_penalty=0.5, presence_penalty=1.0
+    )
+    assert torch.equal(adjusted, torch.tensor([[2.0, 0.0, 0.5, 2.0]]))
+    # The caller's logits are not modified in-place.
+    assert torch.equal(logits, torch.full_like(logits, 2.0))
+
+
+def test_load_model_explains_unfingerprinted_dense_snapshot(tiny_config, tmp_path):
+    import json
+    import torch
+    from qmini.model import QMiniMoE
+
+    model_dir, manifest = _make_fingerprinted_q2_model_bundle(
+        tiny_config, tmp_path / "unfingerprinted-dense-model"
+    )
+    (model_dir / "model.qmini.npz").unlink()
+    torch.save(QMiniMoE(tiny_config).state_dict(), model_dir / "model.pt")
+    manifest["format"] = "qmini-final-model-v1"
+    (model_dir / "model_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(FileNotFoundError, match="does not fingerprint this legacy snapshot"):
+        load_model(model_dir, device="cpu")

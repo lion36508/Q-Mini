@@ -184,6 +184,36 @@ class CausalGatedDepthwiseConv(nn.Module):
         ).transpose(1, 2)
         return self.dropout(self.output(F.silu(mixed) * torch.sigmoid(gate)))
 
+    def forward_prefill(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process a whole prompt and return the convolution cache for decode."""
+        if x.ndim != 3 or x.shape[-1] != self.dim or x.shape[1] < 1:
+            raise ValueError("Convolution prefill input must have shape [batch, non-empty sequence, d_model].")
+        content, gate = self.content_gate(x).chunk(2, dim=-1)
+        quantized_content = fake_quantize_int8(content)
+        mixed = F.conv1d(
+            F.pad(quantized_content.transpose(1, 2), (self.history_length, 0)),
+            self._kernel(),
+            self.depthwise_bias.float(),
+            stride=1,
+            padding=0,
+            dilation=self.dilation,
+            groups=self.dim,
+        ).transpose(1, 2)
+        if self.history_length:
+            if quantized_content.shape[1] >= self.history_length:
+                next_cache = quantized_content[:, -self.history_length:, :].contiguous()
+            else:
+                padding = quantized_content.new_zeros(
+                    quantized_content.shape[0],
+                    self.history_length - quantized_content.shape[1],
+                    self.dim,
+                )
+                next_cache = torch.cat((padding, quantized_content), dim=1).contiguous()
+        else:
+            next_cache = quantized_content[:, :0, :].contiguous()
+        output = self.dropout(self.output(F.silu(mixed) * torch.sigmoid(gate)))
+        return output, next_cache
+
     def forward_step(
         self,
         x: torch.Tensor,
@@ -297,6 +327,16 @@ class GatedStateSpaceMixer(nn.Module):
         gated = states.to(dtype=x.dtype) * torch.sigmoid(self.state_gate(x))
         return self.dropout(self.output(gated))
 
+    def forward_prefill(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process a prompt with the parallel scan and return its final SSM state."""
+        if x.ndim != 3 or x.shape[-1] != self.dim or x.shape[1] < 1:
+            raise ValueError("State-space prefill input must have shape [batch, non-empty sequence, d_model].")
+        drive, decay = self._drive_and_decay(x)
+        states = self.parallel_scan(decay, (1.0 - decay) * drive)
+        gated = states.to(dtype=x.dtype) * torch.sigmoid(self.state_gate(x))
+        output = self.dropout(self.output(gated))
+        return output, states[:, -1, :].contiguous()
+
     def forward_step(
         self,
         x: torch.Tensor,
@@ -367,16 +407,21 @@ class SparseTop1MoE(nn.Module):
         importance = flat_probs.mean(dim=0)
         aux_loss = self.n_experts * torch.sum(importance * load)
 
+        counts = torch.bincount(selected, minlength=self.n_experts)
+        # Sort token assignments once; contiguous groups avoid an O(E * tokens)
+        # comparison/nonzero pass for every expert. Counts cross to Python once.
+        dispatch_order = torch.argsort(selected)
         output = torch.zeros_like(flat)
-        for expert_id, expert in enumerate(self.experts):
-            indices = torch.nonzero(selected == expert_id, as_tuple=False).flatten()
-            if indices.numel():
+        offset = 0
+        for expert, expert_count in zip(self.experts, counts.tolist()):
+            if expert_count:
+                indices = dispatch_order[offset:offset + expert_count]
                 expert_input = flat.index_select(0, indices)
                 expert_output = expert(expert_input)
                 gate = selected_weights.index_select(0, indices).to(expert_output.dtype)
                 output = output.index_copy(0, indices, expert_output * gate)
+                offset += expert_count
 
-        counts = torch.bincount(selected, minlength=self.n_experts)
         return output.reshape(shape), aux_loss, counts
 
     def forward_step(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -409,6 +454,24 @@ class QMiniBlock(nn.Module):
             x = x + self.state_mixer(self.state_norm(x))
         expert_output, aux_loss, counts = self.moe(self.moe_norm(x))
         return x + expert_output, aux_loss, counts
+
+    def forward_prefill(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor | None,
+    ]:
+        mixed, cache = self.mixer.forward_prefill(self.mix_norm(x))
+        x = x + mixed
+        state_cache = None
+        if self.state_mixer is not None:
+            state_output, state_cache = self.state_mixer.forward_prefill(
+                self.state_norm(x)
+            )
+            x = x + state_output
+        expert_output, aux_loss, counts = self.moe(self.moe_norm(x))
+        return x + expert_output, aux_loss, counts, cache, state_cache
 
     def forward_step(
         self,
@@ -538,6 +601,64 @@ class QMiniMoE(nn.Module):
             thinking_steps=steps,
             batch_size=batch_size,
         )
+
+    def prefill(
+        self,
+        input_ids: torch.Tensor,
+        thinking_steps: int | None = None,
+    ) -> tuple[dict[str, Any], QMiniStreamState]:
+        """Run a batch prompt prefill and return caches compatible with forward_step."""
+        if self.training:
+            raise RuntimeError("Prompt prefill requires model.eval().")
+        if torch.is_grad_enabled():
+            raise RuntimeError(
+                "Prompt prefill is inference-only; wrap it in torch.no_grad() "
+                "or torch.inference_mode()."
+            )
+        if input_ids.ndim != 2 or input_ids.shape[0] < 1:
+            raise ValueError("prefill expects token IDs shaped [batch, sequence].")
+        if input_ids.shape[1] < 1 or input_ids.shape[1] > self.config.max_context:
+            raise ValueError(
+                f"Prefill sequence length must be in [1, {self.config.max_context}]."
+            )
+        self._validate_token_id_dtype(input_ids)
+        if input_ids.numel() and (
+            int(input_ids.min()) < 0 or int(input_ids.max()) >= self.config.vocab_size
+        ):
+            raise ValueError("input_ids contain token IDs outside the configured vocabulary.")
+
+        steps = self._resolve_thinking_steps(thinking_steps)
+        x = self.embedding(input_ids.long())
+        caches: list[torch.Tensor | None] = []
+        state_spaces: list[torch.Tensor | None] = []
+        aux_losses: list[torch.Tensor] = []
+        router_counts: list[torch.Tensor] = []
+        for block in self.blocks:
+            x, aux, counts, cache, memory_state = block.forward_prefill(x)
+            caches.append(cache)
+            state_spaces.append(memory_state)
+            aux_losses.append(aux)
+            router_counts.append(counts)
+        for _ in range(steps):
+            x, aux, counts, cache, memory_state = self.refinement.forward_prefill(x)
+            caches.append(cache)
+            state_spaces.append(memory_state)
+            aux_losses.append(aux)
+            router_counts.append(counts)
+
+        logits = self.embedding.project(self.final_norm(x))
+        stream_state = QMiniStreamState(
+            caches=caches,
+            state_spaces=state_spaces,
+            thinking_steps=steps,
+            batch_size=input_ids.shape[0],
+            tokens_processed=input_ids.shape[1],
+        )
+        return {
+            "logits": logits[:, -1, :],
+            "aux_loss": torch.stack(aux_losses).mean(),
+            "router_counts": router_counts,
+        }, stream_state
 
     def forward_step(
         self,
