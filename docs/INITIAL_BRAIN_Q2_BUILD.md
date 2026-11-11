@@ -4,6 +4,8 @@ This process creates an **untrained, random-initialized Q-Mini model** whose del
 
 ## Google Colab
 
+For the automated build-only workflow, open [Q-Mini Initial Brain Builder](https://colab.research.google.com/github/lion36508/Q-Mini/blob/main/colab/QMini_Initial_Brain_Build.ipynb) in Colab and run the cells from top to bottom. It defaults to the repository's 5B-class configuration, checks available RAM and storage, builds locally, verifies the Q2-v2 archive, and publishes a hash-checked copy to Drive. It does not train the model.
+
 Mount Drive and clone the repository:
 
 ```python
