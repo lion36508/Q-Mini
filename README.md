@@ -10,6 +10,10 @@
 
 For the step-zero two-bit Q2-v2 build (without allocating the complete dense 5B model), use [the initial-brain Colab and CLI guide](docs/INITIAL_BRAIN_Q2_BUILD.md). Production matrix weights are exported as verified Q2-v2 (2 bits per symbol). The current QAT trainer still uses FP32 master parameters and optimizer state; this is a training-memory limitation, not a Q2 deployment artifact.
 
+## Training-ready Google Colab package
+
+For the recommended 152M-class path that prepares the model, matching tokenizer, token streams and Q2-v2 initial weights in one Drive package—without starting neural-model training—open [QMini Training-Ready Model Builder](https://colab.research.google.com/github/lion36508/Q-Mini/blob/main/colab/QMini_Training_Ready_Build.ipynb). See [the build and training limits](docs/COLAB_TRAINING_READY_BUILD.md). The 5B profile remains an initial-build target only until a real FSDP/ZeRO trainer is implemented.
+
 ## 1. Project vision
 
 The long-term goal is to train Q-Mini into a useful general-purpose **text assistant** that can understand user instructions, maintain coherent conversations, explain difficult topics, solve structured problems, assist with programming and help users work through technical tasks.

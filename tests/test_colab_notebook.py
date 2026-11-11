@@ -129,3 +129,40 @@ def test_colab_smoke_learning_proof_loads_training_checkpoint_not_dense_snapshot
     assert smoke_stage.index("if not checkpoint_path.is_file():") < smoke_stage.index(
         "checkpoint_payload = torch.load(checkpoint_path"
     )
+
+def test_training_ready_colab_builder_is_syntactically_valid_and_build_only_by_default():
+    notebook_path = (
+        Path(__file__).resolve().parents[1]
+        / "colab"
+        / "QMini_Training_Ready_Build.ipynb"
+    )
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    assert notebook.get("nbformat") == 4
+    code_cells = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    ]
+    import ast
+    for index, source in enumerate(code_cells, start=1):
+        ast.parse(source, filename=f"{notebook_path}:code-cell-{index}")
+
+    settings = code_cells[0]
+    build = code_cells[4]
+    train = code_cells[5]
+    assert 'MODEL_CONFIG = "configs/qmini_research_152m.json"' in settings
+    assert "RUN_TRAINING_NOW = False" in settings
+    assert "build-initial" in build
+    assert "verify_packed_export" in build
+    assert "_verify_initial_brain_artifact" in build
+    assert "_verify_prepared_dataset_manifest" in build
+    assert "tokenizer_sha256" in build
+    assert "train.mask.bin" in build and "valid.mask.bin" in build
+    assert '"training_steps": 0' in build
+    assert "--init-from-initial" in train
+    assert "if not RUN_TRAINING_NOW:" in train
+    assert "if RUN_TRAINING_NOW" not in build
+    assert "distributed trainer" in "".join(
+        cell.get("source", []) for cell in notebook["cells"]
+        if cell.get("cell_type") == "markdown"
+    )
