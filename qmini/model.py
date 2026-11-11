@@ -413,7 +413,7 @@ class SparseTop1MoE(nn.Module):
         dispatch_order = torch.argsort(selected)
         output = torch.zeros_like(flat)
         offset = 0
-        for expert_id, expert_count in enumerate(counts.tolist()):
+        for expert, expert_count in zip(self.experts, counts.tolist()):
             if expert_count:
                 indices = dispatch_order[offset:offset + expert_count]
                 expert_input = flat.index_select(0, indices)
