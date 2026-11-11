@@ -163,7 +163,7 @@ def test_training_ready_colab_builder_is_syntactically_valid_and_build_only_by_d
     assert "if not RUN_TRAINING_NOW:" in train
     assert "if RUN_TRAINING_NOW" not in build
     assert "distributed trainer" in "".join(
-        cell.get("source", []) for cell in notebook["cells"]
+        "".join(cell.get("source", [])) for cell in notebook["cells"]
         if cell.get("cell_type") == "markdown"
     )
 
