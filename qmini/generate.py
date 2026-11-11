@@ -135,6 +135,14 @@ def load_model(model_dir: str | Path, device: str | None = None):
             "cuda" if torch.cuda.is_available() else "cpu"
         )
         if not dense_snapshot_available:
+            if manifest is not None and dense_path.is_file() and not packed_path.is_file():
+                manifest_format = manifest.get("format", "<missing>")
+                raise FileNotFoundError(
+                    f"Dense model.pt exists at {dense_path}, but manifest format "
+                    f"{manifest_format!r} does not fingerprint this legacy snapshot. "
+                    "The file is unverified and cannot be loaded; provide a verified "
+                    "qmini-final-model-v2 bundle or standalone legacy model.pt without a manifest."
+                )
             raise FileNotFoundError(
                 f"No verified compatible weights found. Expected the packed Q2-v2 "
                 f"artifact {packed_path} for CPU inference or a fingerprinted "
@@ -189,14 +197,39 @@ def _encode_generation_prompt_ids(
     return tokenizer.encode(safe_prompt).ids
 
 
+def _apply_repetition_penalties(
+    logits: torch.Tensor,
+    previous_token_ids: list[int],
+    frequency_penalty: float,
+    presence_penalty: float,
+) -> torch.Tensor:
+    """Subtract frequency/presence penalties from tokens generated so far."""
+    if not previous_token_ids or (frequency_penalty == 0.0 and presence_penalty == 0.0):
+        return logits
+    token_ids = torch.tensor(previous_token_ids, dtype=torch.long, device=logits.device)
+    counts = torch.bincount(token_ids, minlength=logits.shape[-1]).to(logits.dtype)
+    return (
+        logits
+        - counts * frequency_penalty
+        - (counts > 0).to(logits.dtype) * presence_penalty
+    )
+
+
 def _sample_next_token(
     logits: torch.Tensor,
     temperature: float,
     top_k: int,
     top_p: float,
     forbidden_ids: tuple[int, ...],
+    previous_token_ids: list[int] | None = None,
+    frequency_penalty: float = 0.0,
+    presence_penalty: float = 0.0,
 ) -> int:
     logits = logits.float().clone()
+    if previous_token_ids:
+        logits = _apply_repetition_penalties(
+            logits, previous_token_ids, frequency_penalty, presence_penalty
+        )
     if forbidden_ids:
         valid = [token_id for token_id in forbidden_ids if 0 <= token_id < logits.shape[-1]]
         if valid:
@@ -235,12 +268,16 @@ def generate(
     thinking_steps: int | None = None,
     *,
     serialized_prompt: bool = False,
+    frequency_penalty: float = 0.0,
+    presence_penalty: float = 0.0,
 ) -> str:
     """Autoregressive generation using cached causal-convolution histories.
 
     Untrusted plain-text prompts have literal reserved-token spellings escaped
     before tokenization. Set serialized_prompt=True only for prompts created by
     Q-Mini's trusted chat serializer, which intentionally includes role markers.
+    Frequency/presence penalties are applied to tokens already generated in this
+    completion; each must be in [-2, 2].
     """
     if not isinstance(prompt, str):
         raise TypeError("prompt must be a string.")
@@ -262,6 +299,14 @@ def generate(
         raise TypeError("top_p must be a real number.")
     if not math.isfinite(float(top_p)) or not 0.0 <= top_p <= 1.0:
         raise ValueError("top_p must be between 0 and 1.")
+    for name, value in (
+        ("frequency_penalty", frequency_penalty),
+        ("presence_penalty", presence_penalty),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a real number.")
+        if not math.isfinite(float(value)) or not -2.0 <= value <= 2.0:
+            raise ValueError(f"{name} must be finite and between -2 and 2.")
     if model.training:
         raise RuntimeError("Call model.eval() before generation.")
     if tokenizer.get_vocab_size() != model.config.vocab_size:
@@ -292,23 +337,27 @@ def generate(
     if len(context_ids) > model.config.max_context:
         context_ids = [bos_id, *context_ids[-(model.config.max_context - 1):]]
 
-    state = None
-    next_logits = None
-    for token_id in context_ids:
-        result, state = model.forward_step(
-            torch.tensor([token_id], dtype=torch.long, device=device),
-            state=state,
-            thinking_steps=thinking_steps,
-        )
-        next_logits = result["logits"]
-
+    prompt_tensor = torch.tensor(
+        context_ids, dtype=torch.long, device=device
+    ).unsqueeze(0)
+    result, state = model.prefill(
+        prompt_tensor, thinking_steps=thinking_steps
+    )
+    next_logits = result["logits"]
     if next_logits is None or state is None:
         raise RuntimeError("Prompt prefill did not produce a model state.")
 
     generated: list[int] = []
     for _ in range(max_new_tokens):
         next_id = _sample_next_token(
-            next_logits, float(temperature), top_k, float(top_p), forbidden_ids
+            next_logits,
+            float(temperature),
+            top_k,
+            float(top_p),
+            forbidden_ids,
+            generated,
+            float(frequency_penalty),
+            float(presence_penalty),
         )
         if next_id == eos_id or (
             end_turn_id is not None and next_id == end_turn_id

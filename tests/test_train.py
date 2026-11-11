@@ -141,6 +141,7 @@ def test_smoke_training_checkpoint_resume_and_export(tiny_config, tmp_path):
     assert manifest["packed_export_bytes"] == packed_path.stat().st_size
     assert manifest["packed_export_sha256"] == hashlib.sha256(packed_path.read_bytes()).hexdigest()
     assert manifest["dense_training_snapshot_included"] is False
+    assert "legacy_dense_snapshot_preserved" not in manifest
     assert manifest["dense_snapshot_bytes"] is None
     assert manifest["dense_snapshot_sha256"] is None
     assert not (final / "model.pt").exists()
@@ -583,7 +584,7 @@ def test_finetuning_initializes_from_new_q2_v2_packed_artifact(
     _write_stream(valid_bin, tiny_config.vocab_size, 256, 602)
 
     # The packed SFT source must be a real Q-Mini-owned final_model artifact,
-    # with its manifest and dense/packed fingerprints created by pretraining.
+    # with its manifest and packed-export fingerprint created by pretraining.
     pretrained_dir = train_model(
         tiny_config, train_bin, valid_bin, tmp_path / "packed-pretrain",
         steps=1, batch_size=1, seq_len=8, grad_accum=1,
@@ -749,3 +750,56 @@ def test_resume_contract_binds_the_complete_dataset_manifest(tmp_path):
     )
     second = make_contract()
     assert first["dataset_manifest"] != second["dataset_manifest"]
+
+def test_finetuning_rejects_preserved_legacy_dense_snapshot(tmp_path, tiny_config):
+    train_bin = tmp_path / "dense-sft-train.bin"
+    valid_bin = tmp_path / "dense-sft-valid.bin"
+    _write_stream(train_bin, tiny_config.vocab_size, 256, 1001)
+    _write_stream(valid_bin, tiny_config.vocab_size, 256, 1002)
+    source_dir = train_model(
+        tiny_config, train_bin, valid_bin, tmp_path / "dense-source",
+        steps=1, batch_size=1, seq_len=8, grad_accum=1,
+        eval_every=1, save_every=1, eval_batches=1,
+    )
+    from qmini.model import QMiniMoE
+    torch.save(QMiniMoE(tiny_config).state_dict(), source_dir / "model.pt")
+
+    with pytest.raises(ValueError, match="Dense .pt SFT initialization is disabled"):
+        train_model(
+            tiny_config, train_bin, valid_bin, tmp_path / "dense-sft-run",
+            steps=1, batch_size=1, seq_len=8, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            init_from=source_dir / "model.pt",
+        )
+
+
+def test_finetuning_rejects_legacy_q2_version_packed_source(
+    tmp_path, tiny_config, monkeypatch
+):
+    from qmini import export as export_module
+
+    train_bin = tmp_path / "q2-version-train.bin"
+    valid_bin = tmp_path / "q2-version-valid.bin"
+    _write_stream(train_bin, tiny_config.vocab_size, 256, 1101)
+    _write_stream(valid_bin, tiny_config.vocab_size, 256, 1102)
+    source_dir = train_model(
+        tiny_config, train_bin, valid_bin, tmp_path / "q2-version-source",
+        steps=1, batch_size=1, seq_len=8, grad_accum=1,
+        eval_every=1, save_every=1, eval_batches=1,
+    )
+    monkeypatch.setattr(
+        export_module,
+        "verify_packed_export",
+        lambda _path: {
+            "format": "qmini-packed-v1",
+            "q2_version": 1,
+            "parameter_count": tiny_config.estimated_parameter_count(),
+        },
+    )
+    with pytest.raises(ValueError, match="verified Q2-v2 two-bit packed export"):
+        train_model(
+            tiny_config, train_bin, valid_bin, tmp_path / "q2-version-sft",
+            steps=1, batch_size=1, seq_len=8, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            init_from=source_dir / "model.qmini.npz",
+        )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -146,7 +147,7 @@ def export_packed_state(
     return export_packed_state_stream(state_dict.items(), config, output_path)
 
 
-def reconstruct_packed_state(path: str | Path) -> tuple[QMiniConfig, dict[str, np.ndarray]]:
+def _reconstruct_packed_state_impl(path: str | Path) -> tuple[QMiniConfig, dict[str, np.ndarray]]:
     """Reconstruct dequantized FP32 arrays from a packed Q-Mini archive."""
     with np.load(Path(path), allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata_json"].item()))
@@ -189,7 +190,23 @@ def reconstruct_packed_state(path: str | Path) -> tuple[QMiniConfig, dict[str, n
     return config, state
 
 
-def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
+def reconstruct_packed_state(
+    path: str | Path,
+) -> tuple[QMiniConfig, dict[str, np.ndarray]]:
+    """Reconstruct a packed state while normalizing malformed archive errors."""
+    target = Path(path)
+    try:
+        return _reconstruct_packed_state_impl(target)
+    except FileNotFoundError:
+        raise
+    except (KeyError, AttributeError, TypeError, OSError, EOFError, zipfile.BadZipFile) as exc:
+        raise ValueError(
+            f"Malformed Q-Mini packed archive at {target}: missing or invalid "
+            "metadata or tensor payload."
+        ) from exc
+
+
+def _verify_packed_export_impl(path: str | Path) -> dict[str, int | str | float]:
     """Validate packed arrays one tensor at a time without expanding a 5B model."""
     target = Path(path)
     packed_weight_bytes = 0
@@ -287,3 +304,18 @@ def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
         "estimated_raw_layout_bytes": config.estimated_packed_export_bytes(),
         "context": config.max_context,
     }
+
+
+
+def verify_packed_export(path: str | Path) -> dict[str, int | str | float]:
+    """Verify a packed archive and normalize malformed-container errors."""
+    target = Path(path)
+    try:
+        return _verify_packed_export_impl(target)
+    except FileNotFoundError:
+        raise
+    except (KeyError, AttributeError, TypeError, OSError, EOFError, zipfile.BadZipFile) as exc:
+        raise ValueError(
+            f"Malformed Q-Mini packed archive at {target}: missing or invalid "
+            "metadata or tensor payload."
+        ) from exc

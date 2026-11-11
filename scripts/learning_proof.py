@@ -100,7 +100,7 @@ def run_learning_proof(
         checkpoint = torch.load(
             run_path / "latest.pt",
             map_location="cpu",
-            weights_only=False,
+            weights_only=True,
         )
         trained_model = QMiniMoE(config).to(device)
         trained_model.load_state_dict(checkpoint["model"], strict=True)

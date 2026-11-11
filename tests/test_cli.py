@@ -234,3 +234,41 @@ def test_preflight_cli_reports_no_dataset_or_optimizer_update(monkeypatch, capsy
     assert report["optimizer_step_performed"] is False
     assert report["weights_updated"] is False
     assert report["logits_shape"] == [1, 8, 128]
+
+
+def test_generate_cli_serialized_prompt_requires_warning_and_passes_penalties(
+    monkeypatch, capsys, tmp_path
+):
+    import sys
+    from types import SimpleNamespace
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(max_thinking_steps=2),
+    )
+    tokenizer = object()
+    called = {}
+    monkeypatch.setattr(cli, "load_model", lambda *_args, **_kwargs: (model, tokenizer, "cpu"))
+
+    def fake_generate(*args, **kwargs):
+        called["args"] = args
+        called["kwargs"] = kwargs
+        return "generated"
+
+    monkeypatch.setattr(cli, "generate", fake_generate)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qmini", "generate",
+            "--model-dir", str(tmp_path / "model"),
+            "--prompt", "<|assistant|>trusted",
+            "--serialized-prompt",
+            "--frequency-penalty", "0.4",
+            "--presence-penalty", "0.7",
+        ],
+    )
+    assert cli.main() == 0
+    assert "WARNING: --serialized-prompt trusts role/control-token markers" in capsys.readouterr().err
+    assert called["kwargs"]["serialized_prompt"] is True
+    assert called["kwargs"]["frequency_penalty"] == 0.4
+    assert called["kwargs"]["presence_penalty"] == 0.7

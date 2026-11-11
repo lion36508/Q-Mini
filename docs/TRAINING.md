@@ -65,12 +65,12 @@ For assistant-only datasets, context tokens do not contribute to the numerator o
 
 ## Colab learning proof and optional own-checkpoint SFT
 
-\`colab/QMini_Training.ipynb\` now defaults to a **50-step small-model smoke run**. It measures held-out token-weighted NLL on a fixed evaluation seed before and after training and records a \`learning_proof_*.json\` file in Drive. A long 152M research run is disabled until the user explicitly sets \`RUN_LONG_TRAINING = True\`; it has no arbitrary maximum optimizer-step cap. Set LONG_OPTIMIZER_STEPS_OVERRIDE to the total step target, or leave it None to use the documented token-budget heuristic. The target is the total optimizer-step count, not an extra count after resume. Increasing it reuses the same Drive run directory and checkpoint, then extends the saved cosine schedule. The step target is excluded from the run identity; source revision, implementation hash, data/tokenizer hashes, model config and optimizer settings remain part of the identity. The 5B configuration is not a Colab training target.
+\`colab/QMini_Training.ipynb\` now defaults to a **50-step small-model smoke run**. Its learning-proof gate requires at least 0.05 held-out cross-entropy improvement (before minus after) on the fixed evaluation seed and records the measured margin in \`learning_proof_*.json\` file in Drive. A long 152M research run is disabled until the user explicitly sets \`RUN_LONG_TRAINING = True\`; it has no arbitrary maximum optimizer-step cap. Set LONG_OPTIMIZER_STEPS_OVERRIDE to the total step target, or leave it None to use the documented token-budget heuristic. The target is the total optimizer-step count, not an extra count after resume. Increasing it reuses the same Drive run directory and checkpoint, then extends the saved cosine schedule. The step target is excluded from the run identity; source revision, implementation hash, data/tokenizer hashes, model config and optimizer settings remain part of the identity. The 5B configuration is not a Colab training target.
 
 The optional SFT stage is disabled by default (\`RUN_OWN_CHECKPOINT_SFT = False\`). Put a separate licensed chat/instruction corpus under \`MyDrive/QMini/artifacts/sft_datasets/\`, with rows containing \`messages\` or supported instruction/answer fields, then set the flag to \`True\`. The notebook:
 1. Uses the matching tokenizer/config from a Q-Mini-produced checkpoint.
 2. Prepares a separate SFT dataset with assistant-only loss masks and a held-out split.
-3. Initializes only from the Q-Mini model's packed \`model.qmini.npz\` artifact via \`--init-from\`; no external model weights are accepted and the new optimizer is fresh.
+3. Initializes only from the Q-Mini model's verified Q2-v2 packed \`model.qmini.npz\` artifact via \`--init-from\`; no external model weights are accepted and the new optimizer is fresh. Current final-model exports are packed-only: dense model.pt snapshots are not accepted as SFT sources, including legacy files left in an older final-model directory.
 4. Resumes to a new hash-keyed run directory on Drive.
 5. Optionally compares the SFT checkpoint with its pre-SFT source on the separate \`sft-heldout-tasks.jsonl\` file, reporting task-pass-rate and per-language changes.
 
@@ -86,7 +86,7 @@ When a prepared assistant-only mask contains very few positive target tokens, th
 
 
 
-Final model manifests now bind the dense model.pt snapshot and packed model.qmini.npz export with independent SHA-256 fingerprints and byte counts. Quantization ablations reject a dense reference whose manifest, config, parameter count, packed artifact size or hashes do not match. This is separate from the resumable latest.pt checkpoint contract.
+Current final-model exports contain the verified Q2-v2 model.qmini.npz deployment artifact; they do not include or fingerprint a dense model.pt snapshot. A legacy model.pt that remains in an older output directory is deliberately not trusted as an SFT source. SFT initialization is .npz-only. The resumable latest.pt training checkpoint is a separate training-state artifact, not a final-model deployment or SFT source.
 
 
 
@@ -127,3 +127,10 @@ allocation. The default guard requires at least 2x the FP32
 parameters+gradients+AdamW-state lower bound. This is a guardrail, not a full
 activation/workspace forecast; the Colab 152M path retains its stricter 8 GiB
 free-memory launch floor and first-step OOM monitoring.
+
+
+## Generation and sampling
+
+The generate CLI supports `--frequency-penalty` and `--presence-penalty`, each defaulting to zero and accepting values in [-2, 2]. Positive values reduce logits for tokens already generated in the current completion; the frequency penalty scales with the number of occurrences and the presence penalty applies once per seen token. These are sampling controls, not a claim of improved model capability. The CLI's opt-in `--serialized-prompt` bypasses literal control-token escaping and prints a warning; use it only for prompts produced by Q-Mini's trusted serializer.
+
+Generation now prefills the prompt with a batched causal-convolution/SSM pass and carries its resulting cache into incremental token decoding. This removes the Python-level one-token forward loop during initial prompt processing. The implementation is covered by tokenwise-versus-prefill parity tests; no performance improvement is claimed until measured on a specified device.

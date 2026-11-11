@@ -9,6 +9,7 @@ def test_colab_setup_preserves_preinstalled_cuda_pytorch():
     setup = "".join(notebook["cells"][2]["source"])
 
     assert "'--no-deps','-e','.'" in setup
+    assert "'pip','install','--upgrade'" not in setup
     assert "from packaging.version import Version" in setup
     assert "Version('2.10.0')" in setup
     assert "pyarrow>=15.0" in setup
@@ -107,6 +108,9 @@ def test_colab_runs_random_brain_architecture_preflight_before_dataset_loading()
     assert "'--device',PREFLIGHT_DEVICE" in preflight
     assert "optimizer step" in preflight
     assert "weights updated" in preflight
+    import ast
+    ast.parse(preflight)
+    assert "subprocess.run(ARCHITECTURE_PREFLIGHT,check=True)" in preflight
     assert "qmini.cli','tokenizer'" in tokenizer_data_stage
     assert setup.index("pip','install','--no-deps','-e','.'") < len(setup)
 
@@ -119,3 +123,9 @@ def test_colab_smoke_learning_proof_loads_training_checkpoint_not_dense_snapshot
     assert "checkpoint_payload.get('format') != 'qmini-checkpoint-v2'" in smoke_stage
     assert "trained_state = checkpoint_payload.get('model')" in smoke_stage
     assert "SMOKE/'final_model'/'model.pt'" not in smoke_stage
+    assert "minimum_nll_improvement': 0.05" in smoke_stage
+    assert "before_report['cross_entropy'] - after_report['cross_entropy'] >= 0.05" in smoke_stage
+    assert "if not checkpoint_path.is_file():" in smoke_stage
+    assert smoke_stage.index("if not checkpoint_path.is_file():") < smoke_stage.index(
+        "checkpoint_payload = torch.load(checkpoint_path"
+    )

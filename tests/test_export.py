@@ -1,4 +1,5 @@
 import json
+import pytest
 import numpy as np
 from qmini.export import export_packed_state, reconstruct_packed_state, verify_packed_export
 from qmini.model import QMiniMoE
@@ -83,3 +84,43 @@ def test_verify_export_rejects_contradictory_q2_v2_codebook_metadata(
     import pytest
     with pytest.raises(ValueError, match="contract/codebook metadata"):
         verify_packed_export(corrupted)
+
+
+@pytest.mark.parametrize(
+    "metadata_payload",
+    [
+        '{"format":"qmini-packed-v2","q2_contract":{},"quaternary_codes":{} }',
+        'null',
+        '[]',
+    ],
+)
+def test_verify_packed_export_normalizes_malformed_metadata(
+    tmp_path, metadata_payload
+):
+    target = tmp_path / "malformed-metadata.npz"
+    np.savez(target, metadata_json=np.asarray(metadata_payload))
+    import pytest
+
+    with pytest.raises(ValueError, match="Malformed Q-Mini packed archive|invalid|Unsupported"):
+        verify_packed_export(target)
+
+
+def test_verify_packed_export_normalizes_missing_required_archive_member(tmp_path):
+    target = tmp_path / "missing-config.npz"
+    metadata = {
+        "format": "qmini-packed-v2",
+        "q2_contract": {
+            "version": 2,
+            "codebook": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+            "row_scale": "2 * mean(abs(original_output_row))",
+            "all_zero_row_scale": 0.0,
+        },
+        "quaternary_codes": {"00": -1.0, "01": -0.5, "10": 0.5, "11": 1.0},
+    }
+    np.savez(target, metadata_json=np.asarray(json.dumps(metadata)))
+    import pytest
+
+    with pytest.raises(ValueError, match="Malformed Q-Mini packed archive"):
+        verify_packed_export(target)
+    with pytest.raises(ValueError, match="Malformed Q-Mini packed archive"):
+        reconstruct_packed_state(target)
