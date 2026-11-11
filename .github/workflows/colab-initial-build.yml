@@ -1,0 +1,55 @@
+name: Q-Mini Colab Build Notebook
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "colab/QMini_Initial_Brain_Build.ipynb"
+      - ".github/workflows/colab-initial-build.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "colab/QMini_Initial_Brain_Build.ipynb"
+      - ".github/workflows/colab-initial-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-notebook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Validate notebook structure and Python syntax
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+
+          path = Path("colab/QMini_Initial_Brain_Build.ipynb")
+          notebook = json.loads(path.read_text(encoding="utf-8"))
+          if notebook.get("nbformat") != 4:
+              raise SystemExit("Expected a Jupyter notebook in nbformat 4.")
+          if not notebook.get("cells"):
+              raise SystemExit("Notebook contains no cells.")
+
+          code_cells = 0
+          for index, cell in enumerate(notebook["cells"], start=1):
+              if cell.get("cell_type") == "code":
+                  source = cell.get("source", [])
+                  source = source if isinstance(source, str) else "".join(source)
+                  ast.parse(source, filename=f"{path}:cell-{index}")
+                  code_cells += 1
+
+          if code_cells < 1:
+              raise SystemExit("Notebook contains no executable Python cells.")
+          print(f"Validated {code_cells} Python cells in {path}.")
+          PY
