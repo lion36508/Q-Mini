@@ -150,7 +150,7 @@ def test_training_ready_colab_builder_is_syntactically_valid_and_build_only_by_d
     settings = code_cells[0]
     build = code_cells[4]
     train = code_cells[5]
-    assert 'MODEL_CONFIG = "configs/qmini_research_152m.json"' in settings
+    assert 'MODEL_CONFIG_REL = "configs/qmini_research_152m.json"' in settings
     assert "RUN_TRAINING_NOW = False" in settings
     assert "build-initial" in build
     assert "verify_packed_export" in build
@@ -166,3 +166,19 @@ def test_training_ready_colab_builder_is_syntactically_valid_and_build_only_by_d
         cell.get("source", []) for cell in notebook["cells"]
         if cell.get("cell_type") == "markdown"
     )
+
+def test_training_ready_package_identity_includes_preparation_contract():
+    notebook_path = (
+        Path(__file__).resolve().parents[1]
+        / "colab"
+        / "QMini_Training_Ready_Build.ipynb"
+    )
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    identity_cell = next(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+        and "package_identity =" in "".join(cell.get("source", []))
+    )
+    assert '"loss_mask_mode": LOSS_MASK_MODE' in identity_cell
+    assert '"minimum_sequence_length": TRAIN_SEQUENCE_LENGTH' in identity_cell
