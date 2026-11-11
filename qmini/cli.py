@@ -257,6 +257,16 @@ def main() -> int:
     )
     train.add_argument("--extend-schedule", action="store_true",
         help="explicitly extend the saved learning-rate schedule")
+    train.add_argument(
+        "--checkpoint-mirror-dir",
+        default=None,
+        help="verified Drive checkpoint store; updates a single progress counter after each saved checkpoint",
+    )
+    train.add_argument(
+        "--checkpoint-session-id",
+        default=None,
+        help="active training lease/session identifier required with --checkpoint-mirror-dir",
+    )
     train.add_argument("--allow-legacy-resume", action="store_true",
         help="resume a checkpoint without data fingerprints after manual verification")
     def do_train(a):
@@ -265,7 +275,9 @@ def main() -> int:
             a.steps, a.batch_size, a.seq_len, a.grad_accum, a.lr, a.weight_decay,
             a.eval_every, a.save_every, a.eval_batches, a.resume, a.tokenizer, None,
             a.extend_schedule, a.allow_legacy_resume, a.train_mask_bin, a.valid_mask_bin,
-            init_from=a.init_from, init_from_initial=a.init_from_initial); return 0
+            init_from=a.init_from, init_from_initial=a.init_from_initial,
+            checkpoint_mirror_dir=a.checkpoint_mirror_dir,
+            checkpoint_session_id=a.checkpoint_session_id); return 0
     train.set_defaults(func=do_train)
     gen = commands.add_parser("generate", help="generate from a trained model")
     gen.add_argument("--model-dir", required=True); gen.add_argument("--prompt", required=True)

@@ -130,7 +130,7 @@ def test_colab_smoke_learning_proof_loads_training_checkpoint_not_dense_snapshot
         "checkpoint_payload = torch.load(checkpoint_path"
     )
 
-def test_training_ready_colab_builder_is_syntactically_valid_and_build_only_by_default():
+def test_training_ready_builder_bundles_dormant_training_runtime_and_never_starts_it():
     notebook_path = (
         Path(__file__).resolve().parents[1]
         / "colab"
@@ -149,23 +149,25 @@ def test_training_ready_colab_builder_is_syntactically_valid_and_build_only_by_d
 
     settings = code_cells[0]
     build = code_cells[4]
-    train = code_cells[5]
+    final_guard = code_cells[5]
     assert 'MODEL_CONFIG_REL = "configs/qmini_research_152m.json"' in settings
-    assert "RUN_TRAINING_NOW = False" in settings
+    assert "RUN_TRAINING_NOW" not in settings
     assert "build-initial" in build
     assert "verify_packed_export" in build
     assert "_verify_initial_brain_artifact" in build
     assert "_verify_prepared_dataset_manifest" in build
-    assert "tokenizer_sha256" in build
-    assert "train.mask.bin" in build and "valid.mask.bin" in build
-    assert '"training_steps": 0' in build
-    assert "--init-from-initial" in train
-    assert "if not RUN_TRAINING_NOW:" in train
-    assert "if RUN_TRAINING_NOW" not in build
-    assert "distributed trainer" in "".join(
+    assert "training_runtime" in build
+    assert '"enabled": False' in build
+    assert "training_progress.json" in build
+    assert "training_runtime_enabled" in build
+    assert "QMini_Training_Runner.ipynb" in final_guard
+    assert "train_model(" not in build
+    markdown = "".join(
         "".join(cell.get("source", [])) for cell in notebook["cells"]
         if cell.get("cell_type") == "markdown"
     )
+    assert "QMini_Training_Runner.ipynb" in markdown
+
 
 def test_training_ready_package_identity_includes_preparation_contract():
     notebook_path = (
@@ -182,3 +184,24 @@ def test_training_ready_package_identity_includes_preparation_contract():
     )
     assert '"loss_mask_mode": LOSS_MASK_MODE' in identity_cell
     assert '"minimum_sequence_length": TRAIN_SEQUENCE_LENGTH' in identity_cell
+def test_training_runner_is_separate_and_has_verified_resume_controls():
+    notebook_path = Path(__file__).resolve().parents[1] / "colab" / "QMini_Training_Runner.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    code_cells = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    ]
+    import ast
+    for index, source in enumerate(code_cells, start=1):
+        ast.parse(source, filename=f"{notebook_path}:code-cell-{index}")
+    settings = code_cells[0]
+    run = "".join(code_cells)
+    assert "START_TRAINING = False" in settings
+    assert "restore_latest_checkpoint" in run
+    assert "TrainingSessionLease" in run
+    assert "checkpoint_mirror_dir" in run
+    assert "checkpoint_session_id" in run
+    assert "mark_training_status" in run
+    assert "model.qmini.npz" in run
+

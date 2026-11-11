@@ -791,6 +791,8 @@ def train_model(
     valid_mask_bin: str | Path | None = None,
     init_from: str | Path | None = None,
     init_from_initial: str | Path | None = None,
+    checkpoint_mirror_dir: str | Path | None = None,
+    checkpoint_session_id: str | None = None,
 ) -> Path:
     """Pretrain from scratch/step-zero Q2 brain, SFT from a trained model, or resume."""
     config.validate()
@@ -847,6 +849,17 @@ def train_model(
         raise ValueError("Provide both --train-mask-bin and --valid-mask-bin, or neither.")
     if tokenizer_path is not None and not Path(tokenizer_path).is_file():
         raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
+    if checkpoint_mirror_dir is not None:
+        if not isinstance(checkpoint_session_id, str) or not checkpoint_session_id.strip():
+            raise ValueError("checkpoint_session_id is required when checkpoint_mirror_dir is enabled.")
+    elif checkpoint_session_id is not None:
+        raise ValueError("checkpoint_session_id cannot be set without checkpoint_mirror_dir.")
+
+    checkpoint_mirror_path = (
+        Path(checkpoint_mirror_dir).expanduser().resolve()
+        if checkpoint_mirror_dir is not None else None
+    )
+
     if resume and (init_from is not None or init_from_initial is not None):
         raise ValueError("--resume cannot be combined with --init-from or --init-from-initial.")
     if init_from is not None and init_from_initial is not None:
@@ -1047,9 +1060,14 @@ def train_model(
         if "scaler" in state:
             scaler.load_state_dict(state["scaler"])
 
-        if start_step >= steps:
+        if start_step > steps:
             raise ValueError(
-                f"Checkpoint is already at step {start_step}; --steps must be a larger total target."
+                f"Checkpoint is already at step {start_step}; --steps cannot be lower than the saved step."
+            )
+        if start_step == steps:
+            print(
+                f"Checkpoint already reached target step {steps:,}; "
+                "skipping optimizer updates and rebuilding the final deployment export."
             )
         if steps > schedule_total_steps:
             if not extend_schedule:
@@ -1096,6 +1114,10 @@ def train_model(
         "deployment_matrix_weight_bits": 2,
         "device": str(device),
         "memory_preflight": memory_preflight,
+        "checkpoint_mirror_dir": (
+            str(checkpoint_mirror_path) if checkpoint_mirror_path is not None else None
+        ),
+        "checkpoint_session_id": checkpoint_session_id,
     }
     _atomic_json_save(run_manifest, run_manifest_path)
     if resume:
@@ -1233,6 +1255,7 @@ def train_model(
         if use_amp:
             record["peak_cuda_memory_bytes"] = int(torch.cuda.max_memory_allocated())
 
+        checkpoint_saved = False
         if completed % save_every == 0 or completed == steps:
             checkpoint_payload = {
                 "format": "qmini-checkpoint-v2",
@@ -1252,11 +1275,31 @@ def train_model(
                 "scaler": scaler.state_dict(),
             }
             _atomic_torch_save(checkpoint_payload, checkpoint_path)
+            checkpoint_saved = True
 
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, allow_nan=False) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+
+        if checkpoint_saved and checkpoint_mirror_path is not None:
+            from .checkpointing import publish_checkpoint
+            progress = publish_checkpoint(
+                checkpoint_path,
+                checkpoint_mirror_path,
+                metrics_path,
+                run_manifest_path,
+                step=completed,
+                target_steps=steps,
+                tokens_seen=tokens_seen,
+                session_id=checkpoint_session_id,
+            )
+            print(
+                "Drive checkpoint verified: "
+                f"step={progress['current_step']:,}/{progress['target_steps']:,} "
+                f"({progress['progress_percent']:.2f}%)",
+                flush=True,
+            )
 
         if completed == 1 or completed % 10 == 0 or "eval_loss" in record:
             message = (
