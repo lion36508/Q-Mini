@@ -160,6 +160,8 @@ def test_training_ready_builder_bundles_dormant_training_runtime_and_never_start
     assert '"enabled": False' in build
     assert "training_progress.json" in build
     assert "training_runtime_enabled" in build
+    assert "training_runtime_manifest_sha256" in build
+    assert 'model_manifest.get("training_runtime_manifest_sha256") != sha256_file(runtime_manifest_path)' in build
     assert "QMini_Training_Runner.ipynb" in final_guard
     assert "train_model(" not in build
     markdown = "".join(
@@ -204,6 +206,7 @@ def test_training_runner_is_separate_and_has_verified_resume_controls():
     assert "checkpoint_session_id" in run
     assert "mark_training_status" in run
     assert "model.qmini.npz" in run
+    assert "training_runtime_manifest_sha256" in run
     assert "No checkpoint restore or optimizer update has run in this cell." in code_cells[3]
     assert "restore_latest_checkpoint" not in code_cells[3]
     activation = next(
