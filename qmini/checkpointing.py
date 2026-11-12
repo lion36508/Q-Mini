@@ -173,17 +173,49 @@ def publish_checkpoint(
     manifest_target = destination / f"{stem}.manifest.json"
 
     destination.mkdir(parents=True, exist_ok=True)
-    # Establish lease ownership before cleaning generations left by an interrupted
-    # (not yet committed) upload.
+    # A checkpoint mirror is only safe while this session owns the writer lease.
     touch_training_lease(destination, session_id)
     committed_step = 0
     progress_path = destination / PROGRESS_FILENAME
+    previous_progress: dict[str, Any] | None = None
     if progress_path.is_file():
         previous_progress = _read_json(progress_path)
         previous_step = previous_progress.get("current_step", 0)
         if isinstance(previous_step, bool) or not isinstance(previous_step, int) or previous_step < 0:
             raise ValueError("Existing Drive progress record has an invalid current_step.")
         committed_step = previous_step
+
+    if step < committed_step:
+        raise ValueError(
+            f"Refusing to move Drive progress backwards from step {committed_step} to {step}. "
+            "Restore the latest committed checkpoint while holding the training lease."
+        )
+    if step == committed_step and previous_progress is not None:
+        manifest_name = previous_progress.get("checkpoint_manifest_file")
+        if not isinstance(manifest_name, str) or Path(manifest_name).name != manifest_name:
+            raise RuntimeError("Current progress has no safe committed checkpoint manifest.")
+        committed_manifest_path = destination / manifest_name
+        committed_manifest = _validate_generation(destination, committed_manifest_path)
+        source_hashes = {
+            "checkpoint": sha256_file(source),
+            "metrics": sha256_file(metrics_source),
+            "run_manifest": sha256_file(run_source),
+        }
+        if (
+            committed_manifest.get("step") != step
+            or committed_manifest.get("target_steps") != target_steps
+            or committed_manifest.get("tokens_seen") != tokens_seen
+            or any(
+                committed_manifest.get(key, {}).get("sha256") != digest
+                for key, digest in source_hashes.items()
+            )
+        ):
+            raise ValueError(
+                "This step is already committed with different checkpoint/metrics/run data; "
+                "refusing to replace its immutable generation."
+            )
+        return previous_progress
+
     _discard_uncommitted_generations(destination, committed_step)
     checkpoint_copy = _publish_immutable(source, checkpoint_target)
     checkpoint_fingerprint = checkpoint_copy
@@ -417,7 +449,7 @@ def mark_training_status(
     final_model_sha256: str | None = None,
     note: str | None = None,
 ) -> dict[str, Any]:
-    if status not in {"paused", "completed", "interrupted", "checkpointed"}:
+    if status not in {"running", "paused", "completed", "interrupted", "checkpointed"}:
         raise ValueError("Unsupported training status.")
     directory = Path(mirror_dir)
     progress_path = directory / PROGRESS_FILENAME
@@ -527,6 +559,16 @@ class TrainingSessionLease:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self.heartbeat_seconds + 2)
+        if exc_type is not None:
+            try:
+                mark_training_status(
+                    self.directory,
+                    "interrupted",
+                    note=f"Training session exited with {exc_type.__name__}; resume from the latest verified checkpoint.",
+                )
+            except (OSError, ValueError, RuntimeError):
+                # A Drive outage must never hide the original training exception.
+                pass
         try:
             current = _read_json(self.path)
             if current.get("session_id") == self.session_id:
@@ -538,7 +580,10 @@ class TrainingSessionLease:
 def touch_training_lease(mirror_dir: str | Path, session_id: str) -> None:
     path = Path(mirror_dir) / LEASE_FILENAME
     if not path.is_file():
-        return
+        raise RuntimeError(
+            "No active Q-Mini training lease exists. Acquire TrainingSessionLease "
+            "before publishing a Drive checkpoint."
+        )
     current = _read_json(path)
     if current.get("session_id") != session_id:
         raise RuntimeError("Checkpoint publisher does not own the active training lease.")

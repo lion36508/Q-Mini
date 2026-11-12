@@ -1022,16 +1022,28 @@ def train_model(
                 "Legacy checkpoint accepted without dataset and optimizer-contract verification.",
                 RuntimeWarning,
             )
-        elif saved_contract != contract:
-            legacy_contract = {
-                key: value for key, value in contract.items()
-                if key not in {"initial_model", "initial_model_path"}
+        elif not isinstance(saved_contract, dict):
+            raise ValueError("Checkpoint resume contract is malformed; refusing an unsafe resume.")
+        else:
+            lineage_keys = {"initial_model", "initial_model_path"}
+            saved_core = {
+                key: value for key, value in saved_contract.items()
+                if key not in lineage_keys
             }
-            if saved_contract != legacy_contract:
+            current_core = {
+                key: value for key, value in contract.items()
+                if key not in lineage_keys
+            }
+            if saved_core != current_core:
                 raise ValueError(
-                    "Resume contract mismatch (dataset/tokenizer, initial weights or optimizer "
-                    "settings). Use a new run directory for changed data or settings."
+                    "Resume contract mismatch (dataset/tokenizer or optimizer settings). "
+                    "Use a new run directory for changed data or settings."
                 )
+            # The initial model is loaded exactly once. On resume the caller must
+            # not pass it again, but the checkpoint's original initialization
+            # fingerprint must remain in every subsequent checkpoint and manifest.
+            contract["initial_model"] = saved_contract.get("initial_model")
+            contract["initial_model_path"] = saved_contract.get("initial_model_path")
 
         model.load_state_dict(state["model"], strict=True)
         optimizer.load_state_dict(state["optimizer"])
@@ -1093,6 +1105,37 @@ def train_model(
                 else "trained-qmini-checkpoint"
             ),
         }
+    elif resume:
+        # A resume does not re-load initial weights, but it must preserve the
+        # lineage recorded by the first training session.
+        try:
+            previous_run_manifest = json.loads(
+                run_manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            previous_run_manifest = {}
+        previous_initial = (
+            previous_run_manifest.get("initial_model")
+            if isinstance(previous_run_manifest, dict) else None
+        )
+        if isinstance(previous_initial, dict):
+            initial_model_record = previous_initial
+        else:
+            saved_initial = (
+                state.get("resume_contract", {}).get("initial_model")
+                if isinstance(state.get("resume_contract"), dict) else None
+            )
+            saved_initial_path = (
+                state.get("resume_contract", {}).get("initial_model_path")
+                if isinstance(state.get("resume_contract"), dict) else None
+            )
+            if isinstance(saved_initial, dict):
+                initial_model_record = {
+                    "path": saved_initial_path,
+                    "sha256": saved_initial.get("sha256"),
+                    "size_bytes": saved_initial.get("size_bytes"),
+                    "kind": "preserved-from-checkpoint-lineage",
+                }
 
     run_manifest = {
         "format": "qmini-run-manifest-v1",

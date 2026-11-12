@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import torch
@@ -109,3 +110,68 @@ def test_pretraining_can_start_from_step_zero_q2_initial_brain(tiny_config, tmp_
     checkpoint = torch.load(run_dir / "latest.pt", map_location="cpu", weights_only=False)
     assert checkpoint["step"] == 1
     assert checkpoint["resume_contract"]["initial_model"]["sha256"]
+
+
+
+def test_q2_initialization_resume_preserves_original_source_lineage(tiny_config, tmp_path):
+    import numpy as np
+    from qmini.checkpointing import PROGRESS_FILENAME, TrainingSessionLease, restore_latest_checkpoint
+    from qmini.train import train_model
+
+    initial_dir = tmp_path / "initial-q2"
+    build_initial_brain(tiny_config, initial_dir, source_revision="resume-lineage-test")
+    train_tokens = np.random.default_rng(91).integers(
+        0, tiny_config.vocab_size, size=160, dtype=np.uint16
+    )
+    valid_tokens = np.random.default_rng(92).integers(
+        0, tiny_config.vocab_size, size=160, dtype=np.uint16
+    )
+    train_path = tmp_path / "train.bin"
+    valid_path = tmp_path / "valid.bin"
+    train_tokens.tofile(train_path)
+    valid_tokens.tofile(valid_path)
+
+    local_run = tmp_path / "local-run"
+    drive_mirror = tmp_path / "drive-mirror"
+    initial_model_path = initial_dir / "model.qmini.npz"
+
+    with TrainingSessionLease(drive_mirror, stale_after_seconds=20, heartbeat_seconds=5) as lease:
+        train_model(
+            tiny_config, train_path, valid_path, local_run,
+            steps=1, batch_size=1, seq_len=8, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            init_from_initial=initial_model_path,
+            checkpoint_mirror_dir=drive_mirror,
+            checkpoint_session_id=lease.session_id,
+        )
+
+    first_manifest = json.loads((local_run / "run.json").read_text(encoding="utf-8"))
+    original_lineage = first_manifest["initial_model"]
+    assert original_lineage["kind"] == "q2-step-zero-initial"
+    expected_sha = hashlib.sha256(initial_model_path.read_bytes()).hexdigest()
+    assert original_lineage["sha256"] == expected_sha
+
+    restored_run = tmp_path / "restored-run"
+    restored = restore_latest_checkpoint(drive_mirror, restored_run)
+    assert restored["step"] == 1
+
+    with TrainingSessionLease(drive_mirror, stale_after_seconds=20, heartbeat_seconds=5) as lease:
+        train_model(
+            tiny_config, train_path, valid_path, restored_run,
+            steps=2, batch_size=1, seq_len=8, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            resume=True, extend_schedule=True,
+            init_from_initial=None,
+            checkpoint_mirror_dir=drive_mirror,
+            checkpoint_session_id=lease.session_id,
+        )
+
+    resumed_manifest = json.loads((restored_run / "run.json").read_text(encoding="utf-8"))
+    assert resumed_manifest["initial_model"] == original_lineage
+    resumed_checkpoint = torch.load(
+        restored_run / "latest.pt", map_location="cpu", weights_only=True
+    )
+    assert resumed_checkpoint["resume_contract"]["initial_model"]["sha256"] == expected_sha
+    progress = json.loads((drive_mirror / PROGRESS_FILENAME).read_text(encoding="utf-8"))
+    assert progress["current_step"] == 2
+    assert progress["status"] == "checkpointed"

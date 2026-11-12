@@ -49,3 +49,13 @@ The progress state values include `not_started`, `checkpointed`, and `completed`
 - Q2-v2 matrix symbols are 2-bit. Row scales are FP32, one-dimensional parameters are FP16, and current QAT master parameters and AdamW optimizer state are FP32. This is not an all-state 2-bit trainer.
 - The current single-device trainer is for the 152M-class Colab research configuration, subject to actual VRAM. It is not a 5B distributed trainer. FSDP/ZeRO sharded optimizer/checkpoint support remains a separate implementation requirement.
 - A saved checkpoint proves resumable training state, not assistant quality. Language capability still requires real licensed data, training, and independent held-out evaluations.
+
+
+## Additional resume-safety invariants
+
+- A Drive checkpoint writer must own the active training-session lease. Publishing without the lease fails closed.
+- The visible progress step is monotonic. A stale writer may not publish a lower step over a newer committed checkpoint.
+- Re-publishing an already committed step is accepted only if its checkpoint, metrics and run-manifest hashes match the committed generation exactly.
+- The training runner does not restore or mutate checkpoint state in its display/preflight cell. It acquires the writer lease first, then restores the latest complete Drive generation while holding that lease.
+- Resume compares data, tokenizer, config and optimizer settings while preserving the original step-zero model fingerprint. The original initialization lineage remains in later run manifests and checkpoints.
+- A Python exception marks the progress status as `interrupted` where Drive is reachable. A hard Colab runtime loss is detected on the next launch when the prior status remains `running` but no live lease can be acquired.

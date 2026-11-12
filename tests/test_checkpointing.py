@@ -35,15 +35,23 @@ def _make_generation_files(root: Path, step: int):
     return checkpoint, metrics, run
 
 
+def _publish_with_lease(checkpoint, mirror, metrics, run, **kwargs):
+    with TrainingSessionLease(mirror, stale_after_seconds=20, heartbeat_seconds=5) as lease:
+        return publish_checkpoint(
+            checkpoint, mirror, metrics, run,
+            session_id=lease.session_id,
+            **kwargs,
+        )
+
+
 def test_checkpoint_generations_publish_progress_and_keep_one_recovery_generation(tmp_path):
     mirror = tmp_path / "drive"
     for step in (2, 4, 6):
         local = tmp_path / f"local-{step}"
         checkpoint, metrics, run = _make_generation_files(local, step)
-        progress = publish_checkpoint(
+        progress = _publish_with_lease(
             checkpoint, mirror, metrics, run,
             step=step, target_steps=10, tokens_seen=step * 64,
-            session_id=f"session-{step}",
         )
         assert progress["current_step"] == step
         assert progress["target_steps"] == 10
@@ -60,10 +68,9 @@ def test_restore_falls_back_to_previous_verified_checkpoint_when_latest_is_corru
     local = tmp_path / "restore"
     for step in (2, 4):
         files = _make_generation_files(tmp_path / f"local-{step}", step)
-        publish_checkpoint(
+        _publish_with_lease(
             files[0], mirror, files[1], files[2],
             step=step, target_steps=10, tokens_seen=step * 32,
-            session_id=f"s{step}",
         )
 
     latest = mirror / "checkpoint-step-000000000004.pt"
@@ -82,9 +89,9 @@ def test_restore_falls_back_to_previous_verified_checkpoint_when_latest_is_corru
 def test_checkpoint_publish_does_not_advance_progress_when_upload_is_incomplete(tmp_path):
     mirror = tmp_path / "drive"
     files = _make_generation_files(tmp_path / "local", 3)
-    publish_checkpoint(
+    _publish_with_lease(
         files[0], mirror, files[1], files[2],
-        step=3, target_steps=9, tokens_seen=192, session_id="first",
+        step=3, target_steps=9, tokens_seen=192,
     )
     previous = (mirror / PROGRESS_FILENAME).read_bytes()
     (mirror / ".checkpoint-step-000000000006.pt.uploading").write_bytes(b"partial")
@@ -95,9 +102,9 @@ def test_checkpoint_publish_does_not_advance_progress_when_upload_is_incomplete(
 def test_mark_training_status_replaces_the_single_progress_record(tmp_path):
     mirror = tmp_path / "drive"
     files = _make_generation_files(tmp_path / "local", 7)
-    publish_checkpoint(
+    _publish_with_lease(
         files[0], mirror, files[1], files[2],
-        step=7, target_steps=7, tokens_seen=448, session_id="s",
+        step=7, target_steps=7, tokens_seen=448,
     )
     progress = mark_training_status(mirror, "completed", final_model_sha256="f" * 64)
     assert progress["status"] == "completed"
@@ -146,13 +153,14 @@ def test_train_model_mirrors_verified_checkpoint_after_each_save(tiny_config, tm
 
     local_run = tmp_path / "local-run"
     mirror = tmp_path / "drive-checkpoints"
-    train_model(
-        tiny_config, train, valid, local_run,
-        steps=2, batch_size=1, seq_len=8, grad_accum=1,
-        eval_every=1, save_every=1, eval_batches=1,
-        checkpoint_mirror_dir=mirror,
-        checkpoint_session_id="integration-test-session",
-    )
+    with TrainingSessionLease(mirror, stale_after_seconds=20, heartbeat_seconds=5) as lease:
+        train_model(
+            tiny_config, train, valid, local_run,
+            steps=2, batch_size=1, seq_len=8, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            checkpoint_mirror_dir=mirror,
+            checkpoint_session_id=lease.session_id,
+        )
     progress = json.loads((mirror / PROGRESS_FILENAME).read_text(encoding="utf-8"))
     assert progress["current_step"] == 2
     assert progress["target_steps"] == 2
@@ -170,14 +178,15 @@ def test_train_model_mirrors_verified_checkpoint_after_each_save(tiny_config, tm
 
     # A fresh Colab runtime restores model, optimizer and RNG state and continues
     # the same fingerprinted training run instead of restarting from step zero.
-    train_model(
-        tiny_config, train, valid, restored_dir,
-        steps=3, batch_size=1, seq_len=8, grad_accum=1,
-        eval_every=1, save_every=1, eval_batches=1,
-        resume=True, extend_schedule=True,
-        checkpoint_mirror_dir=mirror,
-        checkpoint_session_id="integration-test-session-2",
-    )
+    with TrainingSessionLease(mirror, stale_after_seconds=20, heartbeat_seconds=5) as lease:
+        train_model(
+            tiny_config, train, valid, restored_dir,
+            steps=3, batch_size=1, seq_len=8, grad_accum=1,
+            eval_every=1, save_every=1, eval_batches=1,
+            resume=True, extend_schedule=True,
+            checkpoint_mirror_dir=mirror,
+            checkpoint_session_id=lease.session_id,
+        )
     final_progress = json.loads((mirror / PROGRESS_FILENAME).read_text(encoding="utf-8"))
     assert final_progress["current_step"] == 3
     assert final_progress["target_steps"] == 3
@@ -191,16 +200,16 @@ def test_train_model_mirrors_verified_checkpoint_after_each_save(tiny_config, tm
 def test_restore_ignores_generation_written_before_progress_commit(tmp_path):
     mirror = tmp_path / "drive"
     first = _make_generation_files(tmp_path / "first", 2)
-    publish_checkpoint(
+    _publish_with_lease(
         first[0], mirror, first[1], first[2],
-        step=2, target_steps=10, tokens_seen=64, session_id="first",
+        step=2, target_steps=10, tokens_seen=64,
     )
     committed_progress = (mirror / PROGRESS_FILENAME).read_bytes()
 
     second = _make_generation_files(tmp_path / "second", 4)
-    publish_checkpoint(
+    _publish_with_lease(
         second[0], mirror, second[1], second[2],
-        step=4, target_steps=10, tokens_seen=128, session_id="second",
+        step=4, target_steps=10, tokens_seen=128,
     )
     # Simulate a completed generation upload whose atomic progress commit
     # did not occur.
@@ -208,3 +217,35 @@ def test_restore_ignores_generation_written_before_progress_commit(tmp_path):
 
     restored = restore_latest_checkpoint(mirror, tmp_path / "restored")
     assert restored["step"] == 2
+
+
+
+def test_checkpoint_publish_rejects_progress_regression(tmp_path):
+    mirror = tmp_path / "drive"
+    first = _make_generation_files(tmp_path / "first", 6)
+    _publish_with_lease(
+        first[0], mirror, first[1], first[2],
+        step=6, target_steps=10, tokens_seen=384,
+    )
+    before = json.loads((mirror / PROGRESS_FILENAME).read_text(encoding="utf-8"))
+
+    stale = _make_generation_files(tmp_path / "stale", 4)
+    with TrainingSessionLease(mirror, stale_after_seconds=20, heartbeat_seconds=5) as lease:
+        with pytest.raises(ValueError, match="backwards"):
+            publish_checkpoint(
+                stale[0], mirror, stale[1], stale[2],
+                step=4, target_steps=10, tokens_seen=256,
+                session_id=lease.session_id,
+            )
+    after = json.loads((mirror / PROGRESS_FILENAME).read_text(encoding="utf-8"))
+    assert after == before
+
+
+def test_checkpoint_publish_requires_active_writer_lease(tmp_path):
+    files = _make_generation_files(tmp_path / "local", 2)
+    with pytest.raises(RuntimeError, match="No active Q-Mini training lease"):
+        publish_checkpoint(
+            files[0], tmp_path / "drive", files[1], files[2],
+            step=2, target_steps=5, tokens_seen=128,
+            session_id="not-leased",
+        )

@@ -204,4 +204,13 @@ def test_training_runner_is_separate_and_has_verified_resume_controls():
     assert "checkpoint_session_id" in run
     assert "mark_training_status" in run
     assert "model.qmini.npz" in run
+    assert "No checkpoint restore or optimizer update has run in this cell." in code_cells[3]
+    assert code_cells[3].index("restore_latest_checkpoint") == -1
+    activation = next(
+        source for source in code_cells
+        if "with TrainingSessionLease(" in source and "restore_latest_checkpoint" in source
+    )
+    assert activation.index("with TrainingSessionLease(") < activation.index("restore_latest_checkpoint")
+    assert activation.index("restore_latest_checkpoint") < activation.index("train_model(")
+
 
