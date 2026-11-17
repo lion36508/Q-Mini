@@ -146,7 +146,7 @@ def test_tokenizer_iterator_can_resume_from_another_thread_with_jsonl_and_parque
         for index in range(8)
     ]
     jsonl.write_text(
-        "\\n".join(json.dumps(row) for row in jsonl_rows) + "\\n",
+        "\n".join(json.dumps(row) for row in jsonl_rows) + "\n",
         encoding="utf-8",
     )
 
