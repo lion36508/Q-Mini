@@ -130,3 +130,43 @@ def test_zero_validation_fraction_is_rejected_at_tokenizer_api_boundary(tmp_path
             min_frequency=1,
             validation_fraction=0.0,
         )
+
+
+def test_tokenizer_iterator_can_resume_from_another_thread_with_jsonl_and_parquet(tmp_path):
+    """The tokenizer library may consume a primed generator on a worker thread."""
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    pyarrow = pytest.importorskip("pyarrow")
+    import pyarrow.parquet as pq
+
+    jsonl = tmp_path / "documents.jsonl"
+    jsonl_rows = [
+        {"text": f"JSONL document number {index} contains enough distinct words for training."}
+        for index in range(8)
+    ]
+    jsonl.write_text(
+        "\\n".join(json.dumps(row) for row in jsonl_rows) + "\\n",
+        encoding="utf-8",
+    )
+
+    parquet = tmp_path / "documents.parquet"
+    parquet_rows = [
+        {"text": f"Parquet document number {index} contains separate useful training material."}
+        for index in range(8)
+    ]
+    pq.write_table(pyarrow.Table.from_pylist(parquet_rows), parquet)
+
+    # Prime on the main thread so the SQLite connection is created there.
+    # Consume the rest on a worker thread, matching tokenizer-library behavior.
+    iterator = iter_training_text_records(
+        [jsonl, parquet], valid_fraction=0.1, near_duplicate_distance=0
+    )
+    first = next(iterator)
+    assert first
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        remainder = executor.submit(list, iterator).result(timeout=30)
+
+    assert remainder
+    assert len({first, *remainder}) == len([first, *remainder])
