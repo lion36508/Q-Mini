@@ -503,7 +503,7 @@ def iter_training_text_records(
 
     with tempfile.TemporaryDirectory(prefix="qmini-tokenizer-") as temp_dir:
         database_path = Path(temp_dir) / "split.sqlite3"
-        connection = sqlite3.connect(database_path)
+        connection = sqlite3.connect(database_path, check_same_thread=False)
         yielded = 0
         try:
             connection.execute("PRAGMA journal_mode=OFF")
